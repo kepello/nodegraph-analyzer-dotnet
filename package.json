@@ -1,0 +1,30 @@
+{
+  "name": "@kepello/nodegraph-analyzer-dotnet",
+  "version": "0.1.0",
+  "description": ".NET / C# analyzer subprocess for @kepello/nodegraph-analysis. Walks C# source via Roslyn and emits NDJSON. Wraps a managed .NET binary; requires the .NET 9 runtime to be installed on the user's machine.",
+  "bin": {
+    "nodegraph-analyzer-dotnet": "./bin/nodegraph-analyzer-dotnet"
+  },
+  "files": [
+    "bin/",
+    "dist/",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "dotnet publish src/NodegraphAnalyzerDotnet.csproj -c Release -o dist/",
+    "prepublishOnly": "npm run build"
+  },
+  "peerDependencies": {
+    "@kepello/nodegraph-analysis": "^0.3.0"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kepello/nodegraph-analyzer-dotnet.git"
+  },
+  "license": "MIT",
+  "author": "Carl Lance"
+}

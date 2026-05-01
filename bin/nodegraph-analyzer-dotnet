@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# nodegraph-analyzer-dotnet — invoke the published .NET analyzer DLL.
+#
+# Requires the .NET 9 runtime on PATH. The dist/ directory is created by
+# `npm run build`, which runs `dotnet publish` against src/NodegraphAnalyzerDotnet.csproj.
+set -e
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd )"
+DLL="$DIR/dist/NodegraphAnalyzerDotnet.dll"
+if [ ! -f "$DLL" ]; then
+  echo "nodegraph-analyzer-dotnet: $DLL not found." >&2
+  echo "Run 'npm run build' inside the package, or reinstall after a clean publish." >&2
+  exit 1
+fi
+exec dotnet "$DLL" "$@"
