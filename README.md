@@ -44,11 +44,20 @@ npm run build   # runs `dotnet publish` against src/
 
 This produces `dist/NodegraphAnalyzerDotnet.dll` plus its dependencies. The bin shim resolves them at runtime.
 
-## Status
+## Status — slice 3 (0.6.0)
 
-**Slice 0a (pre-slice-1).** Package shape only. The analyzer currently emits the BDS-specific wire format inherited from its previous home in `bds-v3`. Slice 1 will switch it to the `nodegraph-analysis` wire format uniformly with the other analyzer subpackages.
+Emits the `AnalyzerArtifact` wire format defined by `@kepello/nodegraph-analysis` 0.4.0+. Current capabilities:
 
-See [`@kepello/nodegraph-analysis/docs/migration-dotnet.md`](https://github.com/kepello/nodegraph-analysis/blob/main/docs/migration-dotnet.md) for the full migration plan.
+- File discovery + parallel Roslyn parse per `.cs` file
+- Element kinds: file, namespace, class (with `typeKind` flavor for class / struct / record / interface / enum / delegate), method, property, constructor, field, parameter, type-parameter
+- Size observations: `linesOfCode`, `physicalLinesOfCode`, `blankLineCount`, `commentLineCount`, `commentDensity`
+- Documentation observations: `hasDocComment`, `docCommentLineCount`, `commentTagCounts` (TODO/FIXME/HACK/XXX/NOTE word-boundary scan)
+- Code-smell observations: `magicNumberCount` (numeric literals outside `{0, 1, -1, 2}` allowlist; skips `const` / `readonly` field declarations)
+- Per-method scalars: `branchCount`, `sonarBranchCount`, `sonarNestingDepthSum`, `maxNestingDepth`, `parameterCount`, `returnStatementCount`, plus all four Halstead inputs (Sonar 2017 cognitive complexity is a clean-room port)
+- Edges: `imports` (using directives), `inherits` (extends/implements with the I-prefix interface heuristic), `accessesField` / `callsMethod` (intra-class, LCOM4 input), `calls` / `references` for cross-class
+- Class-shape facets pending in a follow-up
+
+Wire-format compatibility: ships against `@kepello/nodegraph-analysis ^0.5.0`. Older engine versions accept the additional fields gracefully (the contract is forward-compatible).
 
 ## License
 
