@@ -1,49 +1,40 @@
-/// <fathom id="code-dotnet-analyzer-analysis" />
-/// <fathom type="code" />
-/// <fathom component="analysis" />
-/// <fathom title=".NET Analyzer — Analysis Helpers" />
-/// <fathom status="draft" />
-/// <fathom traces-to="scenario-analysis" />
-
 /// <summary>
 /// Analysis-component helpers used by the .NET analyzer plugin.
 ///
-/// The plugin as a whole has two component concerns:
-///   (a) fulfilling the subprocess + NDJSON analyzer contract defined by
-///       design-orchestrator — that work lives in Program.cs;
-///   (b) producing the observation-contract fields that design-analysis
-///       defines (declarable role/flavors/capabilities, physical metrics)
-///       — that work lives here.
+/// The plugin produces the structural and observation fields the
+/// 0.4.0 `@kepello/nodegraph-analysis` wire contract defines:
+///   - AnalyzerObservation.size — per-element size measurements
+///   - role / flavors / capabilities — declarable taxonomy metadata
 ///
-/// Keeping (b) in a separate file with component="analysis" makes each
-/// side's boundary honest when the audit checks element content against
-/// its file's declared component. Every function below derives from a
-/// section of design-analysis or assertion-analysis and contributes to
-/// the ObservationElement record the plugin emits.
+/// Per the 0.4.0 contract:
+///   - `linesOfCode` is the effective LOC (span − blanks − comments)
+///   - `physicalLinesOfCode` is the geometric span
+///   - `commentDensity` divides commentLineCount by physicalLinesOfCode
+///
+/// Statement-level body measurements (the old `logicalLinesOfCode`)
+/// move into per-method scalars in slice 3 — not emitted today.
 /// </summary>
 
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 
-/// <fathom derives-from="scenario-analysis#observation-contract/element-structure-rules" />
 static class AnalysisHelpers
 {
-    // --- Physical-domain observations ---------------------------------
+    // --- Size observations ---------------------------------------------
 
     /// <summary>
-    /// Extract physical-domain observations for a C# declaration node.
-    /// Returns null if no physical metrics apply to this element type.
+    /// Extract size-domain measurements for a C# declaration node.
+    /// Always returns a populated `size` sub-record — every element has
+    /// a span, even if the body is empty.
     /// </summary>
-    /// <fathom derives-from="assertion-analysis#observation-contract/physical-observations/physical-metric-rules" />
-    public static object? ExtractPhysicalObservations(SyntaxNode node, SyntaxTree tree, string elementType)
+    public static object ExtractObservation(SyntaxNode node, SyntaxTree tree)
     {
         var lineSpan = node.GetLocation().GetLineSpan();
         var startLine = lineSpan.StartLinePosition.Line + 1; // 1-based
         var endLine = lineSpan.EndLinePosition.Line + 1;
-        var linesOfCode = endLine - startLine + 1;
+        var physicalLinesOfCode = endLine - startLine + 1;
 
-        // Count fully-blank lines within the span.
         var sourceText = tree.GetText();
         var blankLineCount = 0;
         for (var i = startLine; i <= endLine && i <= sourceText.Lines.Count; i++)
@@ -52,62 +43,31 @@ static class AnalysisHelpers
             if (string.IsNullOrWhiteSpace(line)) blankLineCount++;
         }
 
-        // Comment lines: walk comment trivia inside the node's span.
         var commentLineCount = CountCommentLines(node);
+        // Effective LOC: span minus blanks minus comments. Bounded at 0
+        // for degenerate cases where the comment counter overcounts (the
+        // span-bounded blank counter never undercounts, but the comment
+        // counter walks descendant trivia and may include comments that
+        // span beyond the geometric line range).
+        var linesOfCode = Math.Max(0, physicalLinesOfCode - blankLineCount - commentLineCount);
 
-        // commentDensity: derived, only when both inputs are measured and loc > 0.
         double? commentDensity = null;
-        if (linesOfCode > 0)
+        if (physicalLinesOfCode > 0)
         {
-            commentDensity = (double)commentLineCount / linesOfCode;
+            commentDensity = (double)commentLineCount / physicalLinesOfCode;
         }
 
-        // logicalLinesOfCode: applies only to elements with executable bodies.
-        int? logicalLinesOfCode = null;
-        if (HasExecutableBody(node, elementType))
-        {
-            logicalLinesOfCode = CountLogicalLines(node);
-        }
-
-        var physical = new Dictionary<string, object?>
+        var size = new Dictionary<string, object?>
         {
             ["linesOfCode"] = linesOfCode,
+            ["physicalLinesOfCode"] = physicalLinesOfCode,
             ["blankLineCount"] = blankLineCount,
             ["commentLineCount"] = commentLineCount,
         };
         if (commentDensity.HasValue)
-            physical["commentDensity"] = commentDensity.Value;
-        if (logicalLinesOfCode.HasValue)
-            physical["logicalLinesOfCode"] = logicalLinesOfCode.Value;
+            size["commentDensity"] = commentDensity.Value;
 
-        return physical;
-    }
-
-    /// <summary>
-    /// True if the node has an executable body whose statement count should
-    /// be measured as logicalLinesOfCode. Applies to method, function,
-    /// property with getter/setter body, and local functions.
-    /// </summary>
-    static bool HasExecutableBody(SyntaxNode node, string elementType)
-    {
-        if (elementType == "interface" || elementType == "enum" || elementType == "struct")
-            return false;
-
-        if (node is MethodDeclarationSyntax method)
-            return method.Body != null || method.ExpressionBody != null;
-        if (node is LocalFunctionStatementSyntax local)
-            return local.Body != null || local.ExpressionBody != null;
-        if (node is PropertyDeclarationSyntax prop)
-        {
-            if (prop.ExpressionBody != null) return true;
-            if (prop.AccessorList == null) return false;
-            foreach (var accessor in prop.AccessorList.Accessors)
-            {
-                if (accessor.Body != null || accessor.ExpressionBody != null) return true;
-            }
-            return false;
-        }
-        return false;
+        return new Dictionary<string, object?> { ["size"] = size };
     }
 
     /// <summary>
@@ -119,7 +79,9 @@ static class AnalysisHelpers
         foreach (var trivia in node.DescendantTrivia())
         {
             if (trivia.IsKind(SyntaxKind.SingleLineCommentTrivia)
-                || trivia.IsKind(SyntaxKind.MultiLineCommentTrivia))
+                || trivia.IsKind(SyntaxKind.MultiLineCommentTrivia)
+                || trivia.IsKind(SyntaxKind.SingleLineDocumentationCommentTrivia)
+                || trivia.IsKind(SyntaxKind.MultiLineDocumentationCommentTrivia))
             {
                 var text = trivia.ToFullString();
                 count += text.Split('\n').Length;
@@ -128,43 +90,17 @@ static class AnalysisHelpers
         return count;
     }
 
-    /// <summary>
-    /// Count executable statement nodes in an element's body.
-    /// </summary>
-    static int CountLogicalLines(SyntaxNode node)
-    {
-        BlockSyntax? body = null;
-        if (node is MethodDeclarationSyntax method)
-            body = method.Body;
-        else if (node is LocalFunctionStatementSyntax local)
-            body = local.Body;
-        else if (node is PropertyDeclarationSyntax prop && prop.AccessorList != null)
-        {
-            // Sum statements across all accessors.
-            var count = 0;
-            foreach (var accessor in prop.AccessorList.Accessors)
-            {
-                if (accessor.Body != null)
-                {
-                    count += accessor.Body.DescendantNodes().OfType<StatementSyntax>()
-                        .Count(s => s is not BlockSyntax);
-                }
-            }
-            return count;
-        }
-
-        if (body == null) return 0;
-        return body.DescendantNodes().OfType<StatementSyntax>().Count(s => s is not BlockSyntax);
-    }
-
     // --- Declarable Taxonomy Mapping ----------------------------------
 
     /// <summary>
-    /// Compute DeclarableRole + DeclarableFlavors + CapabilityMask for a
-    /// C# syntax node per reference/node-normalization.md §4. Returns null for
-    /// nodes whose element type does not map to a declarable role.
+    /// Compute role + flavors + capabilities for a C# syntax node.
+    /// Returns null for nodes whose element type does not map to a
+    /// declarable role.
+    ///
+    /// Mirrors the role/flavor vocabulary the TS analyzer uses so a
+    /// consumer's bridge sees structurally identical metadata across
+    /// the two languages.
     /// </summary>
-    /// <fathom derives-from="scenario-analysis#observation-contract/element-structure-rules" />
     public static (string role, Dictionary<string, object?> flavors, Dictionary<string, bool> capabilities)?
         MapToDeclarable(SyntaxNode node)
     {
@@ -202,7 +138,6 @@ static class AnalysisHelpers
                 role = "constructor";
                 break;
             case DestructorDeclarationSyntax:
-                // Destructors map to method (same collapse as Swift deinit)
                 role = "method";
                 break;
             case EnumMemberDeclarationSyntax:
@@ -218,12 +153,8 @@ static class AnalysisHelpers
             case IndexerDeclarationSyntax:
                 role = "indexer";
                 break;
-            case OperatorDeclarationSyntax op:
-                role = "operator";
-                // operatorKind: unary (1 param) or binary (2 params)
-                typeKind = null; // clear; we'll set operatorKind below via a special flavor
-                break;
-            case ConversionOperatorDeclarationSyntax cod:
+            case OperatorDeclarationSyntax:
+            case ConversionOperatorDeclarationSyntax:
                 role = "operator";
                 break;
             case ParameterSyntax:
@@ -245,7 +176,6 @@ static class AnalysisHelpers
         var flavors = new Dictionary<string, object?>();
         if (typeKind != null) flavors["typeKind"] = typeKind;
 
-        // Role-specific flavor extraction for the new roles
         if (node is OperatorDeclarationSyntax opDecl)
         {
             flavors["operatorKind"] = opDecl.ParameterList.Parameters.Count == 1 ? "unary" : "binary";
@@ -275,8 +205,6 @@ static class AnalysisHelpers
             if (paramSyntax.Default != null) flavors["hasDefault"] = true;
         }
 
-        // Read modifier tokens on the declaration. Every member-level and
-        // type-level declaration in C# exposes Modifiers as a SyntaxTokenList.
         var modifiers = node switch
         {
             MemberDeclarationSyntax m => m.Modifiers,
@@ -296,9 +224,6 @@ static class AnalysisHelpers
                 case "readonly": flavors["readonly"] = true; break;
                 case "async": flavors["async"] = true; break;
                 case "partial": flavors["partial"] = true; break;
-                // Access modifiers. `protected internal` and `private protected`
-                // combine two tokens — the second-pass correction below merges
-                // them into the canonical hyphenated form.
                 case "public": flavors["access"] = "public"; break;
                 case "private":
                     flavors["access"] = flavors.TryGetValue("access", out var pa) && (string?)pa == "protected"
@@ -322,10 +247,10 @@ static class AnalysisHelpers
     }
 
     /// <summary>
-    /// Fixed per-role capability mask, mirroring the table in
-    /// src/analysis/declarable.ts. Must stay in sync with the TS side.
+    /// Fixed per-role capability mask. Mirrors the same table TS / HTML
+    /// / CSS analyzers use; a consumer that maps role → capabilities
+    /// gets identical results across languages.
     /// </summary>
-    /// <fathom derives-from="scenario-analysis#observation-contract/element-structure-rules" />
     static Dictionary<string, bool> CapabilitiesForRole(string role) => role switch
     {
         "namespace" or "type" or "section" =>

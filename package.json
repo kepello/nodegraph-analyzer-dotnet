@@ -1,7 +1,7 @@
 {
   "name": "@kepello/nodegraph-analyzer-dotnet",
-  "version": "0.2.0",
-  "description": ".NET / C# analyzer subprocess for @kepello/nodegraph-analysis. Walks C# source via Roslyn and emits NDJSON. Wraps a managed .NET binary; requires the .NET 9 runtime to be installed on the user's machine.",
+  "version": "0.3.0",
+  "description": "C# / .NET analyzer subprocess for @kepello/nodegraph-analysis. Walks C# source via Roslyn and emits structural elements (classes, methods, properties, edges, size observations) over the analyzer NDJSON protocol. Wraps a managed .NET binary; requires the .NET 9 runtime to be installed on the user's machine.",
   "bin": {
     "nodegraph-analyzer-dotnet": "./bin/nodegraph-analyzer-dotnet"
   },
