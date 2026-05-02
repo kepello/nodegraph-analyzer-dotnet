@@ -249,6 +249,33 @@ static (object[] elements, object[] artifactEdges, object[] problems) DecomposeW
         var fqn = DeriveFullyQualifiedName(semanticModel, node);
         var parameterTypes = ExtractParameterTypes(semanticModel, node);
 
+        // Per-method scalars (slice 3): the 10 raw inputs the engine
+        // needs for cyclomatic / cognitive / Halstead / MI / complexity-
+        // density derivations. Returns null for nodes without a body.
+        var scalars = ScalarHelpers.Extract(node);
+
+        // Intra-class edges (slice 3, LCOM4 input): accessesField and
+        // callsMethod fire from a method body to a member of the same
+        // type. Cross-type references continue to use the existing
+        // `references` / `calls` types so the cohesion graph stays
+        // disconnected from the coupling graph (architecture.md §5).
+        if (ScalarHelpers.HasExtractableBody(node))
+        {
+            var containingType = node.Ancestors().OfType<TypeDeclarationSyntax>().FirstOrDefault();
+            if (containingType != null)
+            {
+                var memberIndex = IntraClassHelpers.BuildIndex(containingType);
+                var rels = relationships.ToList();
+                foreach (var (edgeType, target) in IntraClassHelpers.ExtractEdges(node, memberIndex))
+                {
+                    var canonicalTarget = Canonicalize(target);
+                    if (string.IsNullOrEmpty(canonicalTarget)) continue;
+                    rels.Add(new { type = edgeType, targetName = canonicalTarget });
+                }
+                relationships = rels.ToArray();
+            }
+        }
+
         var lineSpan = node.GetLocation().GetLineSpan();
         var sourceLocation = new
         {
@@ -283,6 +310,22 @@ static (object[] elements, object[] artifactEdges, object[] problems) DecomposeW
             ["metadata"] = metadata,
         };
         if (parentName != null) element["parentName"] = parentName;
+        if (scalars != null)
+        {
+            element["scalars"] = new Dictionary<string, object?>
+            {
+                ["branchCount"] = scalars.BranchCount,
+                ["sonarBranchCount"] = scalars.SonarBranchCount,
+                ["sonarNestingDepthSum"] = scalars.SonarNestingDepthSum,
+                ["maxNestingDepth"] = scalars.MaxNestingDepth,
+                ["parameterCount"] = scalars.ParameterCount,
+                ["returnStatementCount"] = scalars.ReturnStatementCount,
+                ["halsteadOperatorCount"] = scalars.HalsteadOperatorCount,
+                ["halsteadOperandCount"] = scalars.HalsteadOperandCount,
+                ["halsteadUniqueOperators"] = scalars.HalsteadUniqueOperators,
+                ["halsteadUniqueOperands"] = scalars.HalsteadUniqueOperands,
+            };
+        }
 
         if (includeComments)
         {
