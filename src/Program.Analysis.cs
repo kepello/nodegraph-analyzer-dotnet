@@ -24,9 +24,11 @@ static class AnalysisHelpers
     // --- Size observations ---------------------------------------------
 
     /// <summary>
-    /// Extract size-domain measurements for a C# declaration node.
-    /// Always returns a populated `size` sub-record — every element has
-    /// a span, even if the body is empty.
+    /// Extract size-domain + documentation-domain measurements for a C#
+    /// declaration node. Always returns a populated `size` sub-record;
+    /// `documentation` is populated whenever the analyzer can scan
+    /// leading-comment trivia (every node with a span qualifies, so this
+    /// is essentially always).
     /// </summary>
     public static object ExtractObservation(SyntaxNode node, SyntaxTree tree)
     {
@@ -45,10 +47,7 @@ static class AnalysisHelpers
 
         var commentLineCount = CountCommentLines(node);
         // Effective LOC: span minus blanks minus comments. Bounded at 0
-        // for degenerate cases where the comment counter overcounts (the
-        // span-bounded blank counter never undercounts, but the comment
-        // counter walks descendant trivia and may include comments that
-        // span beyond the geometric line range).
+        // for degenerate cases where the comment counter overcounts.
         var linesOfCode = Math.Max(0, physicalLinesOfCode - blankLineCount - commentLineCount);
 
         double? commentDensity = null;
@@ -67,7 +66,91 @@ static class AnalysisHelpers
         if (commentDensity.HasValue)
             size["commentDensity"] = commentDensity.Value;
 
-        return new Dictionary<string, object?> { ["size"] = size };
+        return new Dictionary<string, object?>
+        {
+            ["size"] = size,
+            ["documentation"] = ExtractDocumentation(node),
+        };
+    }
+
+    // --- Documentation sub-record (per metrics-dictionary.md §2.7) -----
+
+    private static readonly (string Tag, System.Text.RegularExpressions.Regex Re)[] TagPatterns = new[]
+    {
+        ("TODO", new System.Text.RegularExpressions.Regex(@"\bTODO\b")),
+        ("FIXME", new System.Text.RegularExpressions.Regex(@"\bFIXME\b")),
+        ("HACK", new System.Text.RegularExpressions.Regex(@"\bHACK\b")),
+        ("XXX", new System.Text.RegularExpressions.Regex(@"\bXXX\b")),
+        ("NOTE", new System.Text.RegularExpressions.Regex(@"\bNOTE\b")),
+    };
+
+    /// <summary>
+    /// Build the documentation sub-record. `hasDocComment` is true iff
+    /// the node has a leading XML doc-comment trivia (Roslyn's
+    /// SingleLineDocumentationCommentTrivia or
+    /// MultiLineDocumentationCommentTrivia — i.e. /// or /** */ in C#).
+    /// `commentTagCounts` regex-scans the union of leading + descendant
+    /// comment trivia for TODO/FIXME/HACK/XXX/NOTE word-boundary matches.
+    /// </summary>
+    static Dictionary<string, object?> ExtractDocumentation(SyntaxNode node)
+    {
+        var hasDocComment = false;
+        int? docCommentLineCount = null;
+
+        foreach (var trivia in node.GetLeadingTrivia())
+        {
+            if (trivia.IsKind(SyntaxKind.SingleLineDocumentationCommentTrivia)
+                || trivia.IsKind(SyntaxKind.MultiLineDocumentationCommentTrivia))
+            {
+                hasDocComment = true;
+                if (docCommentLineCount == null)
+                {
+                    docCommentLineCount = trivia.ToFullString().Split('\n').Length;
+                }
+            }
+        }
+
+        var counts = new Dictionary<string, int>
+        {
+            ["TODO"] = 0,
+            ["FIXME"] = 0,
+            ["HACK"] = 0,
+            ["XXX"] = 0,
+            ["NOTE"] = 0,
+        };
+
+        // DescendantTrivia walks leading + trailing trivia of every
+        // descendant token, including the first token's leading trivia
+        // (i.e. the node's own leading trivia). Don't add GetLeadingTrivia
+        // separately — it would double-count.
+        foreach (var trivia in node.DescendantTrivia())
+        {
+            if (!IsCommentTrivia(trivia)) continue;
+            var text = trivia.ToFullString();
+            foreach (var (tag, re) in TagPatterns)
+            {
+                counts[tag] += re.Matches(text).Count;
+            }
+        }
+
+        var doc = new Dictionary<string, object?>
+        {
+            ["hasDocComment"] = hasDocComment,
+            ["commentTagCounts"] = counts,
+        };
+        if (docCommentLineCount.HasValue)
+        {
+            doc["docCommentLineCount"] = docCommentLineCount.Value;
+        }
+        return doc;
+    }
+
+    static bool IsCommentTrivia(SyntaxTrivia trivia)
+    {
+        return trivia.IsKind(SyntaxKind.SingleLineCommentTrivia)
+            || trivia.IsKind(SyntaxKind.MultiLineCommentTrivia)
+            || trivia.IsKind(SyntaxKind.SingleLineDocumentationCommentTrivia)
+            || trivia.IsKind(SyntaxKind.MultiLineDocumentationCommentTrivia);
     }
 
     /// <summary>
