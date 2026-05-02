@@ -70,6 +70,10 @@ static class AnalysisHelpers
         {
             ["size"] = size,
             ["documentation"] = ExtractDocumentation(node),
+            ["codeSmells"] = new Dictionary<string, object?>
+            {
+                ["magicNumberCount"] = ExtractMagicNumberCount(node),
+            },
         };
     }
 
@@ -151,6 +155,61 @@ static class AnalysisHelpers
             || trivia.IsKind(SyntaxKind.MultiLineCommentTrivia)
             || trivia.IsKind(SyntaxKind.SingleLineDocumentationCommentTrivia)
             || trivia.IsKind(SyntaxKind.MultiLineDocumentationCommentTrivia);
+    }
+
+    // --- Magic number observation (per metrics-dictionary §2.8) -------
+
+    /// <summary>
+    /// Count NumericLiteralExpression nodes within `node`'s subtree
+    /// that aren't part of a constant-like declaration. Skips
+    /// allowlisted small values (|v| ∈ {0, 1, 2} — so -1, -2 also pass)
+    /// and literals inside `const` / `readonly` field decls,
+    /// `const` local decls, and EnumMember initializers.
+    /// </summary>
+    static int ExtractMagicNumberCount(SyntaxNode node)
+    {
+        var count = 0;
+        foreach (var literal in node.DescendantNodes())
+        {
+            if (literal is not LiteralExpressionSyntax lit) continue;
+            if (!lit.IsKind(SyntaxKind.NumericLiteralExpression)) continue;
+            var raw = lit.Token.Value;
+            if (raw == null) continue;
+            double v;
+            try { v = System.Convert.ToDouble(raw); }
+            catch { continue; }
+            var abs = System.Math.Abs(v);
+            if (abs == 0 || abs == 1 || abs == 2) continue;
+            if (IsInsideConstantContext(lit)) continue;
+            count++;
+        }
+        return count;
+    }
+
+    static bool IsInsideConstantContext(SyntaxNode node)
+    {
+        var cur = node.Parent;
+        while (cur != null)
+        {
+            if (cur is LocalDeclarationStatementSyntax local)
+            {
+                foreach (var m in local.Modifiers)
+                    if (m.IsKind(SyntaxKind.ConstKeyword)) return true;
+                return false;
+            }
+            if (cur is FieldDeclarationSyntax field)
+            {
+                foreach (var m in field.Modifiers)
+                {
+                    if (m.IsKind(SyntaxKind.ConstKeyword)) return true;
+                    if (m.IsKind(SyntaxKind.ReadOnlyKeyword)) return true;
+                }
+                return false;
+            }
+            if (cur is EnumMemberDeclarationSyntax) return true;
+            cur = cur.Parent;
+        }
+        return false;
     }
 
     /// <summary>
