@@ -1,6 +1,6 @@
 {
   "name": "@kepello/nodegraph-analyzer-dotnet",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": ".NET / C# analyzer subprocess for @kepello/nodegraph-analysis. Walks C# source via Roslyn and emits NDJSON. Wraps a managed .NET binary; requires the .NET 9 runtime to be installed on the user's machine.",
   "bin": {
     "nodegraph-analyzer-dotnet": "./bin/nodegraph-analyzer-dotnet"
@@ -16,7 +16,7 @@
     "prepublishOnly": "npm run build"
   },
   "peerDependencies": {
-    "@kepello/nodegraph-analysis": "^0.3.0"
+    "@kepello/nodegraph-analysis": "^0.4.0"
   },
   "publishConfig": {
     "registry": "https://npm.pkg.github.com"
