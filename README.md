@@ -44,7 +44,7 @@ npm run build   # runs `dotnet publish` against src/
 
 This produces `dist/NodegraphAnalyzerDotnet.dll` plus its dependencies. The bin shim resolves them at runtime.
 
-## Status — slice 3 (0.6.0)
+## Status
 
 Emits the `AnalyzerArtifact` wire format defined by `@kepello/nodegraph-analysis` 0.4.0+. Current capabilities:
 
