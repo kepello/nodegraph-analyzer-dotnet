@@ -44,6 +44,14 @@ npm run build   # runs `dotnet publish` against src/
 
 This produces `dist/NodegraphAnalyzerDotnet.dll` plus its dependencies. The bin shim resolves them at runtime.
 
+## Testing
+
+```sh
+dotnet test tests/NodegraphAnalyzerDotnet.Tests.csproj
+```
+
+55 xUnit tests covering cyclomatic complexity, cognitive complexity, and Halstead metrics extraction. Tests pin documented behavioral gaps from trade-offs 2.2.3 (recursion detection), 2.2.6 (magic number -2), and 2.2.8 (comment line over-count).
+
 ## Status
 
 Emits the `AnalyzerArtifact` wire format defined by `@kepello/nodegraph-analysis` 0.4.0+. Current capabilities:
