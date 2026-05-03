@@ -46,6 +46,15 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 static class CognitiveHelpers
 {
+    /// <summary>
+    /// Sonar 2017 cognitive complexity inputs extracted from a method
+    /// body. <c>SonarBranchCount</c> is the count of structural
+    /// branching constructs; <c>SonarNestingDepthSum</c> is the sum of
+    /// nesting depths at every branch (the per-branch increment under
+    /// the Sonar 2017 algorithm); <c>MaxNestingDepth</c> is the
+    /// deepest nesting reached. Cognitive complexity is computed
+    /// engine-side as <c>SonarBranchCount + SonarNestingDepthSum</c>.
+    /// </summary>
     public record CognitiveResult(
         int SonarBranchCount,
         int SonarNestingDepthSum,

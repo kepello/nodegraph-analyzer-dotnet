@@ -30,6 +30,14 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 static class ScalarHelpers
 {
+    /// <summary>
+    /// Per-method scalar metrics packaged for emission as an
+    /// <c>AnalyzerObservation</c> over the wire format. All ten fields
+    /// are nullable: an interface signature / abstract method /
+    /// auto-property / field has no body, so every scalar is null.
+    /// Cyclomatic / cognitive complexity and the four Halstead
+    /// primitives compose engine-side from these inputs.
+    /// </summary>
     public sealed record ScalarsResult(
         int? BranchCount,
         int? SonarBranchCount,

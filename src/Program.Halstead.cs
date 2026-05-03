@@ -46,6 +46,14 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 static class HalsteadHelpers
 {
+    /// <summary>
+    /// Halstead software-science inputs extracted from a method body.
+    /// <c>OperatorCount</c> (N1) and <c>OperandCount</c> (N2) are total
+    /// occurrences; <c>UniqueOperators</c> (n1) and
+    /// <c>UniqueOperands</c> (n2) are distinct counts. Higher-level
+    /// Halstead metrics (vocabulary, length, volume, difficulty,
+    /// effort) are computed engine-side from these four primitives.
+    /// </summary>
     public record HalsteadResult(
         int OperatorCount,
         int OperandCount,

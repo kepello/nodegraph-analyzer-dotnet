@@ -45,6 +45,16 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 static class IntraClassHelpers
 {
+    /// <summary>
+    /// Per-type member index used by the intra-class edge extractor
+    /// (LCOM4 input). <c>Fields</c> includes fields and properties
+    /// (properties hold state for the cohesion graph);
+    /// <c>Methods</c> includes regular methods, accessors, and
+    /// constructors. Members shadowed by parameters or locals are
+    /// over-counted by design — see work-tracking gap
+    /// <c>analyzers-intraclass-shadow</c> for the deferred precision
+    /// improvement.
+    /// </summary>
     public sealed record ClassMemberIndex(
         HashSet<string> Fields,
         HashSet<string> Methods);
