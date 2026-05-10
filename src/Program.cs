@@ -30,6 +30,15 @@ if (string.IsNullOrEmpty(cliArgs.Path))
 
 var loadedConfig = LoadAnalyzerConfig(cliArgs.Path);
 
+if (cliArgs.Discover)
+{
+    foreach (var filePath in DiscoverCsFiles(cliArgs.Path, loadedConfig.Include, loadedConfig.Exclude))
+    {
+        Console.Out.WriteLine(filePath);
+    }
+    return;
+}
+
 RunOutput(cliArgs, loadedConfig);
 
 static void RunOutput(AnalyzerArgs args, AnalyzerConfig config)
@@ -824,6 +833,10 @@ static AnalyzerArgs ParseArgs(string[] argv)
         {
             result.Path = argv[++i];
         }
+        else if (argv[i] == "--discover")
+        {
+            result.Discover = true;
+        }
     }
 
     return result;
@@ -915,6 +928,7 @@ static bool MatchesFilter(string path, List<string> include, List<string> exclud
 class AnalyzerArgs
 {
     public string Path { get; set; } = "";
+    public bool Discover { get; set; }
 }
 
 class AnalyzerConfig
