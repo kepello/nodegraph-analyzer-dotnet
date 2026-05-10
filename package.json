@@ -16,7 +16,7 @@
     "prepublishOnly": "npm run build"
   },
   "peerDependencies": {
-    "@kepello/nodegraph-analysis": "^0.17.0"
+    "@kepello/nodegraph-analysis": "^0.18.0"
   },
   "publishConfig": {
     "registry": "https://npm.pkg.github.com"
