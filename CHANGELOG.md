@@ -2,6 +2,39 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.9.0] — 2026-05-10
+
+`.csproj` and `.sln` files are now first-class file types — claimed in `--discover` mode and emitted as structural artifacts in normal analyze mode (Fathom work-md row 1.11.15, Phase 1). Strictly additive — no changes to existing `.cs` analysis behavior. Phase 2 (MSBuildWorkspace integration for .cs files when a project is available) is a follow-up that ships as `0.10.0`.
+
+### Added
+
+- **`.csproj` discovery + structural artifact** — emits one artifact per `.csproj` with `language: "csproj"` and a single `project`-kind element. Element metadata: `sdk`, `targetFrameworks` (array; covers `<TargetFramework>` and `<TargetFrameworks>` multi-target form), `outputType`, `packageReferenceCount`, `projectReferenceCount`. Artifact-level edges:
+  - `references` (subtype `package`) → `<package>@<version>` pseudo-target for each `<PackageReference>`.
+  - `references` (subtype `project`) → resolved absolute path of each `<ProjectReference>` (relative paths resolved against the .csproj's own directory; backslash-to-forward-slash normalized for Windows-style includes).
+- **`.sln` discovery + structural artifact** — emits one artifact per `.sln` with `language: "sln"` and a single `solution`-kind element. Element metadata: `formatVersion` (e.g., "12.00"), `projectCount`. Artifact-level edges:
+  - `contains` → resolved absolute path of each project file referenced via the `Project(...)` lines. Solution-folder entries (no extension) are filtered out.
+- **NuGet dependencies** — `Microsoft.CodeAnalysis.Workspaces.MSBuild` 5.3.0 + `Microsoft.Build.Locator` 1.7.8 added (currently unused; pre-positioned for Phase 2 workspace integration).
+- **`Program.ProjectFiles.cs`** — new file housing `ProjectFileHelpers` static class with `BuildCsprojArtifact(content, filePath)` and `BuildSlnArtifact(content, filePath)`.
+
+### Changed
+
+- **`DiscoverCsFiles` renamed to `DiscoverFiles`** — now walks any extension in the new `FileExtensionsHolder.Analyzed` set (`.cs`, `.csproj`, `.sln`). Universal-skip extension check added (mirrors `UNIVERSAL_SKIP_EXTENSIONS` from `@kepello/nodegraph-analysis@0.18.2+`: `.dll`, `.pdb`).
+- **`RunOutput`** — branches by extension: `.cs` files run through the existing Roslyn pipeline (parallel, unchanged); `.csproj` and `.sln` files run sequentially through the new XML/text parsers.
+
+### Why
+
+`fathom discover` previously reported `.csproj` and `.sln` files in the unclaimed-extensions hint. .NET project files ARE C# project structure — they belong in the dotnet analyzer's claim set. Surfaced 2026-05-10 by operator after `analyzer-skip-extensions` (Fathom 2.2.22) cleared the .dll/.pdb noise and made the .csproj/.sln gap visible.
+
+### Tests
+
+8 new test cases in `tests/ProjectFilesTests.cs`: csproj basic SDK project, PackageReferences as edges, ProjectReferences with relative-path resolution, multi-target framework parsing, malformed XML produces problems-bearing artifact; sln with projects produces contains edges, sln solution-folder entries filtered out, empty sln. 68 tests pass (was 60).
+
+End-to-end smoke against the dotnet analyzer's own dir: 2 .csproj artifacts emit with correct metadata + edges (3 `Microsoft.*` PackageReferences for src; 5 xunit/Microsoft.* PackageReferences for tests).
+
+### Phase 2 preview (`0.10.0`)
+
+The Roslyn pipeline currently compiles each `.cs` file in isolation with only the System runtime as a reference (see `Program.cs` `DecomposeWithRoslyn` + the existing comment at the function header). Phase 2 will use the discovered `.csproj`/`.sln` files to build a real `MSBuildWorkspace`, giving every .cs file proper SemanticModel access with NuGet packages and ProjectReferences resolved. That's a behavior change to what `.cs` analysis emits (better resolution → potentially more/different edges) and warrants a separate ship.
+
 ## [0.8.0] — 2026-05-10
 
 `--discover` CLI flag added (Fathom work-md row 1.11.13). Strictly additive — minor bump because it adds new public CLI behavior.

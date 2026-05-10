@@ -32,7 +32,7 @@ var loadedConfig = LoadAnalyzerConfig(cliArgs.Path);
 
 if (cliArgs.Discover)
 {
-    foreach (var filePath in DiscoverCsFiles(cliArgs.Path, loadedConfig.Include, loadedConfig.Exclude))
+    foreach (var filePath in DiscoverFiles(cliArgs.Path, loadedConfig.Include, loadedConfig.Exclude))
     {
         Console.Out.WriteLine(filePath);
     }
@@ -45,8 +45,11 @@ static void RunOutput(AnalyzerArgs args, AnalyzerConfig config)
 {
     Console.Error.WriteLine($".NET analyzer (output): scanning {args.Path}");
 
-    var csFiles = DiscoverCsFiles(args.Path, config.Include, config.Exclude);
-    Console.Error.WriteLine($".NET analyzer: found {csFiles.Count} .cs files");
+    var allFiles = DiscoverFiles(args.Path, config.Include, config.Exclude);
+    var csFiles = allFiles.Where(f => Path.GetExtension(f).Equals(".cs", StringComparison.OrdinalIgnoreCase)).ToList();
+    var csprojFiles = allFiles.Where(f => Path.GetExtension(f).Equals(".csproj", StringComparison.OrdinalIgnoreCase)).ToList();
+    var slnFiles = allFiles.Where(f => Path.GetExtension(f).Equals(".sln", StringComparison.OrdinalIgnoreCase)).ToList();
+    Console.Error.WriteLine($".NET analyzer: found {csFiles.Count} .cs, {csprojFiles.Count} .csproj, {slnFiles.Count} .sln");
 
     var startTime = DateTime.UtcNow;
     var elementsEmitted = 0;
@@ -71,6 +74,45 @@ static void RunOutput(AnalyzerArgs args, AnalyzerConfig config)
             Emit(new { type = "error", message = $"Failed to process: {ex.Message}", filePath });
         }
     });
+
+    // Structural emission for project + solution files. XML / text
+    // parsing is cheap; sequential is fine and avoids any concern about
+    // emitting cross-artifact edges in non-deterministic order.
+    foreach (var filePath in csprojFiles)
+    {
+        try
+        {
+            var content = File.ReadAllText(filePath);
+            var artifact = ProjectFileHelpers.BuildCsprojArtifact(content, filePath);
+            if (artifact != null)
+            {
+                Emit(new { type = "artifact", artifact });
+                Interlocked.Increment(ref elementsEmitted);
+            }
+        }
+        catch (Exception ex)
+        {
+            Emit(new { type = "error", message = $"Failed to process .csproj: {ex.Message}", filePath });
+        }
+    }
+
+    foreach (var filePath in slnFiles)
+    {
+        try
+        {
+            var content = File.ReadAllText(filePath);
+            var artifact = ProjectFileHelpers.BuildSlnArtifact(content, filePath);
+            if (artifact != null)
+            {
+                Emit(new { type = "artifact", artifact });
+                Interlocked.Increment(ref elementsEmitted);
+            }
+        }
+        catch (Exception ex)
+        {
+            Emit(new { type = "error", message = $"Failed to process .sln: {ex.Message}", filePath });
+        }
+    }
 
     var durationMs = (int)(DateTime.UtcNow - startTime).TotalMilliseconds;
     Emit(new { type = "complete", elementsEmitted, durationMs });
@@ -876,7 +918,7 @@ static AnalyzerConfig LoadAnalyzerConfig(string repoRoot)
     }
 }
 
-static List<string> DiscoverCsFiles(string rootPath, List<string> include, List<string> exclude)
+static List<string> DiscoverFiles(string rootPath, List<string> include, List<string> exclude)
 {
     var results = new List<string>();
     WalkDirectory(rootPath, results, rootPath, include, exclude);
@@ -897,8 +939,11 @@ static void WalkDirectory(string dir, List<string> results, string rootPath,
                 if (SkipDirsHolder.Set.Contains(name)) continue;
                 WalkDirectory(entry, results, rootPath, include, exclude);
             }
-            else if (Path.GetExtension(entry) == ".cs")
+            else
             {
+                var ext = Path.GetExtension(entry);
+                if (FileExtensionsHolder.UniversalSkip.Contains(ext)) continue;
+                if (!FileExtensionsHolder.Analyzed.Contains(ext)) continue;
                 var relPath = Path.GetRelativePath(rootPath, entry);
                 if (MatchesFilter(relPath, include, exclude))
                     results.Add(entry);
@@ -951,5 +996,25 @@ static class SkipDirsHolder
         "obj", "bin", ".vs",
         "__pycache__", ".venv",
         ".fathom",
+    };
+}
+
+static class FileExtensionsHolder
+{
+    public static readonly HashSet<string> Analyzed = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".cs",
+        ".csproj",
+        ".sln",
+    };
+
+    // Universally-skipped file extensions (build artifacts that leak
+    // into walkable directories). Mirrors `UNIVERSAL_SKIP_EXTENSIONS`
+    // in `@kepello/nodegraph-analysis@0.18.2+` so the .NET analyzer's
+    // own walk drops them at the source.
+    public static readonly HashSet<string> UniversalSkip = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".dll",
+        ".pdb",
     };
 }

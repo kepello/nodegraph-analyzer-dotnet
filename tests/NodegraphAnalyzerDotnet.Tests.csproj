@@ -23,6 +23,7 @@
     <Compile Include="../src/Program.Cyclomatic.cs" Link="Program.Cyclomatic.cs" />
     <Compile Include="../src/Program.Cognitive.cs" Link="Program.Cognitive.cs" />
     <Compile Include="../src/Program.Halstead.cs" Link="Program.Halstead.cs" />
+    <Compile Include="../src/Program.ProjectFiles.cs" Link="Program.ProjectFiles.cs" />
   </ItemGroup>
 
 </Project>
