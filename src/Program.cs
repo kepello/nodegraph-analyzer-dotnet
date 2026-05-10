@@ -28,13 +28,15 @@ if (string.IsNullOrEmpty(cliArgs.Path))
     Environment.Exit(1);
 }
 
-RunOutput(cliArgs);
+var loadedConfig = LoadAnalyzerConfig(cliArgs.Path);
 
-static void RunOutput(AnalyzerArgs args)
+RunOutput(cliArgs, loadedConfig);
+
+static void RunOutput(AnalyzerArgs args, AnalyzerConfig config)
 {
-    Console.Error.WriteLine($".NET analyzer (output): mode={args.Mode}, scanning {args.Path}");
+    Console.Error.WriteLine($".NET analyzer (output): scanning {args.Path}");
 
-    var csFiles = DiscoverCsFiles(args.Path, args.Include, args.Exclude);
+    var csFiles = DiscoverCsFiles(args.Path, config.Include, config.Exclude);
     Console.Error.WriteLine($".NET analyzer: found {csFiles.Count} .cs files");
 
     var startTime = DateTime.UtcNow;
@@ -50,7 +52,7 @@ static void RunOutput(AnalyzerArgs args)
         try
         {
             var content = File.ReadAllText(filePath);
-            var artifact = BuildArtifact(content, filePath, args.Mode, args.IncludeComments);
+            var artifact = BuildArtifact(content, filePath, config.IncludeComments);
             if (artifact == null) return;
             Emit(new { type = "artifact", artifact });
             Interlocked.Increment(ref elementsEmitted);
@@ -67,11 +69,9 @@ static void RunOutput(AnalyzerArgs args)
 
 // --- Artifact assembly ----------------------------------------------------
 
-static object? BuildArtifact(string content, string filePath, string mode, bool includeComments)
+static object? BuildArtifact(string content, string filePath, bool includeComments)
 {
-    var (elements, artifactEdges, problems) = mode == "identity"
-        ? (Array.Empty<object>(), Array.Empty<object>(), Array.Empty<object>())
-        : DecomposeWithRoslyn(content, filePath, mode, includeComments);
+    var (elements, artifactEdges, problems) = DecomposeWithRoslyn(content, filePath, includeComments);
 
     var artifact = new Dictionary<string, object?>
     {
@@ -134,7 +134,7 @@ static string? ExtractFileLeadingComment(string content)
 // --- Roslyn Decomposition ---
 
 static (object[] elements, object[] artifactEdges, object[] problems) DecomposeWithRoslyn(
-    string content, string filePath, string mode, bool includeComments)
+    string content, string filePath, bool includeComments)
 {
     var tree = CSharpSyntaxTree.ParseText(content, path: filePath);
     var root = tree.GetRoot();
@@ -218,7 +218,7 @@ static (object[] elements, object[] artifactEdges, object[] problems) DecomposeW
 
         var sourceText = node.ToFullString().Trim();
         var contentHash = ComputeHash(sourceText);
-        var relationships = ExtractRelationships(node, allNames, mode);
+        var relationships = ExtractRelationships(node, allNames);
 
         // Type declarations emit explicit contains edges to their direct
         // members. Core treats these as authoritative for containment.
@@ -586,11 +586,10 @@ static string[]? ExtractParameterTypes(SemanticModel model, SyntaxNode node)
 
 // --- Edge extraction --------------------------------------------------
 
-static object[] ExtractRelationships(SyntaxNode node, HashSet<string> allNames, string mode)
+static object[] ExtractRelationships(SyntaxNode node, HashSet<string> allNames)
 {
     var relationships = new List<object>();
     var seen = new HashSet<string>();
-    var isFullMode = mode == "full";
 
     void Add(string type, string subtype, string rawName)
     {
@@ -653,7 +652,6 @@ static object[] ExtractRelationships(SyntaxNode node, HashSet<string> allNames, 
         }
     }
 
-    if (isFullMode)
     {
         foreach (var creation in node.DescendantNodes().OfType<ObjectCreationExpressionSyntax>())
         {
@@ -663,7 +661,7 @@ static object[] ExtractRelationships(SyntaxNode node, HashSet<string> allNames, 
         }
     }
 
-    if (isFullMode && node is TypeDeclarationSyntax overrideContainer)
+    if (node is TypeDeclarationSyntax overrideContainer)
     {
         foreach (var member in overrideContainer.Members.OfType<MethodDeclarationSyntax>())
         {
@@ -674,7 +672,6 @@ static object[] ExtractRelationships(SyntaxNode node, HashSet<string> allNames, 
         }
     }
 
-    if (isFullMode)
     {
         foreach (var assign in node.DescendantNodes().OfType<AssignmentExpressionSyntax>())
         {
@@ -690,7 +687,6 @@ static object[] ExtractRelationships(SyntaxNode node, HashSet<string> allNames, 
         }
     }
 
-    if (isFullMode)
     {
         IEnumerable<TypeParameterConstraintClauseSyntax> constraintClauses = node switch
         {
@@ -709,7 +705,6 @@ static object[] ExtractRelationships(SyntaxNode node, HashSet<string> allNames, 
         }
     }
 
-    if (isFullMode)
     {
         foreach (var attrList in node.DescendantNodes().OfType<AttributeListSyntax>())
         {
@@ -723,7 +718,7 @@ static object[] ExtractRelationships(SyntaxNode node, HashSet<string> allNames, 
         }
     }
 
-    if (isFullMode && node is TypeDeclarationSyntax partialCandidate)
+    if (node is TypeDeclarationSyntax partialCandidate)
     {
         if (partialCandidate.Modifiers.Any(m => m.IsKind(SyntaxKind.PartialKeyword)))
         {
@@ -801,29 +796,47 @@ static AnalyzerArgs ParseArgs(string[] argv)
 
     for (int i = 0; i < argv.Length; i++)
     {
-        switch (argv[i])
+        if (argv[i] == "--path" && i + 1 < argv.Length)
         {
-            case "--path" when i + 1 < argv.Length:
-                result.Path = argv[++i];
-                break;
-            case "--mode" when i + 1 < argv.Length:
-                var m = argv[++i];
-                if (m is "identity" or "structure" or "full")
-                    result.Mode = m;
-                break;
-            case "--include-comments":
-                result.IncludeComments = true;
-                break;
-            case "--include" when i + 1 < argv.Length:
-                result.Include.Add(argv[++i]);
-                break;
-            case "--exclude" when i + 1 < argv.Length:
-                result.Exclude.Add(argv[++i]);
-                break;
+            result.Path = argv[++i];
         }
     }
 
     return result;
+}
+
+static AnalyzerConfig LoadAnalyzerConfig(string repoRoot)
+{
+    var configPath = Path.Combine(repoRoot, "nodegraph-analyzer-dotnet.config.json");
+    if (!File.Exists(configPath)) return new AnalyzerConfig();
+
+    string raw;
+    try
+    {
+        raw = File.ReadAllText(configPath);
+    }
+    catch (Exception ex)
+    {
+        throw new InvalidOperationException($"Failed to read {configPath}: {ex.Message}");
+    }
+    try
+    {
+        var doc = JsonDocument.Parse(raw);
+        var cfg = new AnalyzerConfig();
+        if (doc.RootElement.TryGetProperty("include", out var inc) && inc.ValueKind == JsonValueKind.Array)
+            foreach (var v in inc.EnumerateArray())
+                if (v.ValueKind == JsonValueKind.String) cfg.Include.Add(v.GetString()!);
+        if (doc.RootElement.TryGetProperty("exclude", out var exc) && exc.ValueKind == JsonValueKind.Array)
+            foreach (var v in exc.EnumerateArray())
+                if (v.ValueKind == JsonValueKind.String) cfg.Exclude.Add(v.GetString()!);
+        if (doc.RootElement.TryGetProperty("includeComments", out var ic) && ic.ValueKind == JsonValueKind.True)
+            cfg.IncludeComments = true;
+        return cfg;
+    }
+    catch (JsonException ex)
+    {
+        throw new InvalidOperationException($"Failed to parse {configPath}: {ex.Message}");
+    }
 }
 
 static List<string> DiscoverCsFiles(string rootPath, List<string> include, List<string> exclude)
@@ -844,8 +857,7 @@ static void WalkDirectory(string dir, List<string> results, string rootPath,
 
             if (Directory.Exists(entry))
             {
-                if (name is "bin" or "obj" or "node_modules" or ".git" or ".vs")
-                    continue;
+                if (SkipDirsHolder.Set.Contains(name)) continue;
                 WalkDirectory(entry, results, rootPath, include, exclude);
             }
             else if (Path.GetExtension(entry) == ".cs")
@@ -879,8 +891,27 @@ static bool MatchesFilter(string path, List<string> include, List<string> exclud
 class AnalyzerArgs
 {
     public string Path { get; set; } = "";
-    public string Mode { get; set; } = "structure";
-    public bool IncludeComments { get; set; }
+}
+
+class AnalyzerConfig
+{
     public List<string> Include { get; } = new();
     public List<string> Exclude { get; } = new();
+    public bool IncludeComments { get; set; }
+}
+
+// Universal-skip directory names. Mirrors `UNIVERSAL_SKIP_DIRS` in
+// `@kepello/nodegraph-analysis/protocol`. Plus `bin` / `.vs` which the
+// .NET tooling produces as build outputs alongside `obj`.
+static class SkipDirsHolder
+{
+    public static readonly HashSet<string> Set = new(StringComparer.Ordinal)
+    {
+        ".git", "node_modules",
+        "dist", ".next", ".cache", ".turbo", ".parcel-cache", ".vite", ".output",
+        ".build", ".swiftpm",
+        "obj", "bin", ".vs",
+        "__pycache__", ".venv",
+        ".fathom",
+    };
 }
