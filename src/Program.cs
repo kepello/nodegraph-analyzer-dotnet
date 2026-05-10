@@ -81,7 +81,7 @@ static object? BuildArtifact(string content, string filePath, bool includeCommen
         ["contentHash"] = ComputeHash(content),
         ["elements"] = elements,
     };
-    if (artifactEdges.Length > 0) artifact["edges"] = artifactEdges;
+    if (artifactEdges.Length > 0) artifact["edges"] = DedupeEdges(artifactEdges).ToArray();
     if (problems.Length > 0) artifact["problems"] = problems;
 
     if (includeComments)
@@ -306,7 +306,7 @@ static (object[] elements, object[] artifactEdges, object[] problems) DecomposeW
             ["sourceLocation"] = sourceLocation,
             ["contentHash"] = contentHash,
             ["observation"] = observation,
-            ["edges"] = relationships,
+            ["edges"] = DedupeEdges(relationships).ToArray(),
             ["metadata"] = metadata,
         };
         if (parentName != null) element["parentName"] = parentName;
@@ -788,6 +788,30 @@ static string Canonicalize(string raw)
 static void Emit(object obj)
 {
     Console.WriteLine(JsonSerializer.Serialize(obj));
+}
+
+/// <summary>
+/// Dedupe a per-source edge list to one edge per (type, targetName).
+/// First wins. Mirrors `dedupeEdges` in `@kepello/nodegraph-analysis/protocol`
+/// — the substrate's `edges_live_unique_*` indexes exclude `subtype` from
+/// the key, so two edges differing only in subtype collide at ingest.
+/// Edges are anonymous-typed objects; reflection reads `type` + `targetName`.
+/// </summary>
+static List<object> DedupeEdges(IEnumerable<object>? edges)
+{
+    if (edges == null) return new List<object>();
+    var seen = new HashSet<string>();
+    var output = new List<object>();
+    foreach (var edge in edges)
+    {
+        var t = edge.GetType();
+        var typeProp = t.GetProperty("type")?.GetValue(edge) as string ?? "";
+        var targetName = t.GetProperty("targetName")?.GetValue(edge) as string ?? "";
+        var key = $"{typeProp}|{targetName}";
+        if (!seen.Add(key)) continue;
+        output.Add(edge);
+    }
+    return output;
 }
 
 static AnalyzerArgs ParseArgs(string[] argv)
