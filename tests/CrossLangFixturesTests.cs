@@ -16,10 +16,13 @@ namespace NodegraphAnalyzerDotnet.Tests;
 
 public class CrossLangFixturesTests
 {
+    // Assembly.Location = .../nodegraph-analyzer-dotnet/tests/bin/Debug/net9.0/<asm>.dll
+    // 6 ups: net9.0/ → Debug/ → bin/ → tests/ → nodegraph-analyzer-dotnet/ → nodegraph/ → Fathom/
+    // then down into fathom/fathom-test-fixtures/cross-lang-metrics
     private static readonly string FixturesDir = Path.GetFullPath(
         Path.Combine(
             Path.GetDirectoryName(typeof(CrossLangFixturesTests).Assembly.Location)!,
-            "../../../../../fathom-test-fixtures/cross-lang-metrics"
+            "../../../../../../fathom/fathom-test-fixtures/cross-lang-metrics"
         )
     );
 
