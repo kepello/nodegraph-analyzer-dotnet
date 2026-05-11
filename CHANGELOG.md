@@ -2,6 +2,18 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.9.1] — 2026-05-10
+
+Bug fix: csproj and sln structural artifacts now set `contentHash` on their element (Fathom work-md row 2.2.25 — partial fix). Patch bump.
+
+### Fixed
+
+- **`Program.ProjectFiles.cs` `BuildCsprojArtifact` and `BuildSlnArtifact`** now set `contentHash` on the emitted project / solution element. Without it, the substrate's `upsert` couldn't compare incoming-vs-existing hashes for these elements — they reported as `superseded` on every re-ingest pass even when the source file was unchanged. Surfaced 2026-05-10 by the `ingestSummary` feature (Fathom 1.11.16): every back-to-back `fathom analyze` against the workspace meta-repo showed the 2 .csproj elements drifting. Fix: hash the artifact's raw text and assign it as the element's `contentHash` (same source as the artifact-level contentHash; one element per file means the hashes coincide). Matches the pattern Roslyn-emitted .cs elements already follow.
+
+### Impact
+
+Back-to-back runs against the Fathom workspace meta-repo: 2 csproj elements drop from the `superseded`-each-run list. No effect on artifact-level identity or per-run metric values.
+
 ## [0.9.0] — 2026-05-10
 
 `.csproj` and `.sln` files are now first-class file types — claimed in `--discover` mode and emitted as structural artifacts in normal analyze mode (Fathom work-md row 1.11.15, Phase 1). Strictly additive — no changes to existing `.cs` analysis behavior. Phase 2 (MSBuildWorkspace integration for .cs files when a project is available) is a follow-up that ships as `0.10.0`.

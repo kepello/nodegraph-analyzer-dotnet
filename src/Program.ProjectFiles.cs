@@ -120,6 +120,13 @@ static class ProjectFileHelpers
         {
             ["name"] = elementName,
             ["kind"] = "project",
+            // Element contentHash is required for the substrate's
+            // upsert-vs-supersede decision. Hashing the artifact's raw
+            // text gives the right stability semantics: re-runs against
+            // unchanged .csproj content produce identical hashes and
+            // the element reports as `unchanged` instead of superseding
+            // every run.
+            ["contentHash"] = ComputeHash(content),
         };
         if (elementMetadata.Count > 0) element["metadata"] = elementMetadata;
 
@@ -204,6 +211,7 @@ static class ProjectFileHelpers
         {
             ["name"] = solutionName,
             ["kind"] = "solution",
+            ["contentHash"] = ComputeHash(content),
         };
         if (elementMetadata.Count > 0) element["metadata"] = elementMetadata;
 
