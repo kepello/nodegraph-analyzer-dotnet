@@ -28,7 +28,7 @@ if (string.IsNullOrEmpty(cliArgs.Path))
     Environment.Exit(1);
 }
 
-var loadedConfig = LoadAnalyzerConfig(cliArgs.Path);
+var loadedConfig = ReadAnalyzerConfigFromStdin();
 
 if (cliArgs.Discover)
 {
@@ -884,19 +884,23 @@ static AnalyzerArgs ParseArgs(string[] argv)
     return result;
 }
 
-static AnalyzerConfig LoadAnalyzerConfig(string repoRoot)
+// Read the per-analyzer config slice from stdin (UTF-8 JSON,
+// terminated by EOF). The orchestrator writes one JSON object per
+// analyzer before closing stdin. Empty stdin → fatal error
+// (orchestrator invocations always send a payload; absence means
+// standalone invocation without piped config).
+static AnalyzerConfig ReadAnalyzerConfigFromStdin()
 {
-    var configPath = Path.Combine(repoRoot, "nodegraph-analyzer-dotnet.config.json");
-    if (!File.Exists(configPath)) return new AnalyzerConfig();
-
     string raw;
-    try
+    using (var reader = new StreamReader(Console.OpenStandardInput()))
     {
-        raw = File.ReadAllText(configPath);
+        raw = reader.ReadToEnd().Trim();
     }
-    catch (Exception ex)
+    if (string.IsNullOrEmpty(raw))
     {
-        throw new InvalidOperationException($"Failed to read {configPath}: {ex.Message}");
+        throw new InvalidOperationException(
+            "analyzer config not provided on stdin. Orchestrator invocations always pipe a JSON object; standalone use must do the same."
+        );
     }
     try
     {
@@ -914,7 +918,7 @@ static AnalyzerConfig LoadAnalyzerConfig(string repoRoot)
     }
     catch (JsonException ex)
     {
-        throw new InvalidOperationException($"Failed to parse {configPath}: {ex.Message}");
+        throw new InvalidOperationException($"Failed to parse analyzer config from stdin: {ex.Message}");
     }
 }
 
