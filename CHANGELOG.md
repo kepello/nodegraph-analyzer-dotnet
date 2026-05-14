@@ -2,6 +2,31 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.11.0] — 2026-05-14
+
+**Breaking — overload disambiguation switches from visit-order `$N` suffixes to parameter-type signatures** (Fathom work row `analyzers-overload-natural-key-retrofit` 2.2.23). Same convention as the Swift port shipped in 0.9.0. Callable declarations (methods / constructors / destructors / operators / indexers / local functions) now suffix their raw name with `(Type1,Type2,...)` extracted from `BaseMethodDeclarationSyntax.ParameterList` / `IndexerDeclarationSyntax.ParameterList`; the suffix gets sanitized to dashes by the existing `Canonicalize` regex.
+
+The previous `${count}` visit-order logic produced unstable identity across runs — deleting one overload re-keyed all surviving ones, causing the substrate to tombstone + re-insert physically-unchanged elements with the wrong content hash + edge associations. With the new convention, sibling reordering / addition / deletion leaves surviving overloads' canonical names unchanged.
+
+The `$N` collision counter stays as a defensive fallback for the unusual case of two callables producing identical signatures (e.g. via generic constraints).
+
+### Added
+
+- `GetParamSignature(SyntaxNode)` static helper producing `"(Type1,Type2,...)"` for callable nodes, empty string for non-callables.
+
+### Changed
+
+- Qualified raw names for callable declarations now include the parameter-type signature.
+- Type-declaration contains-edge construction matches the new suffix shape so member edges resolve to the correct canonical name.
+
+### Migration
+
+- Operators with persistent graphs see overload element ids shift from `name`, `name$1`, ... to `name-type1`, `name-type1-type2`, etc. The substrate detects this as tombstone-then-insert; consumers querying by canonical id need to update. Pre-prod stance — no graceful renaming. Delete `<workspace>/.fathom/graph.db` and re-run `fathom analyze`.
+
+### Tests
+
+68/68 xUnit tests pass unchanged.
+
 ## [0.10.0] — 2026-05-14
 
 **Breaking — analyzer-config-consolidation (Fathom work row 0.1.2).** Reads its config slice from stdin (UTF-8 JSON, EOF-terminated) instead of `<repoRoot>/nodegraph-analyzer-<name>.config.json`. Imported helper `loadAnalyzerConfig` (gone from `@kepello/nodegraph-analysis/protocol`) replaced by `readAnalyzerConfigFromStdin()`. Per-analyzer config files at workspace root are no longer read — operators must move `include` / `exclude` / `includeComments` into the workspace `.fathom/fathom.config.json` under `analyzers.<name>` and delete the standalone file.

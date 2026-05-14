@@ -226,6 +226,17 @@ static (object[] elements, object[] artifactEdges, object[] problems) DecomposeW
     }
 
     // Second pass: extract elements with overload disambiguation.
+    // For callable kinds (methods / constructors / destructors / operators
+    // / indexers / local functions) the raw name is suffixed with a
+    // parameter-type signature `(Type1,Type2,...)` so overload identity
+    // stays stable across sibling reorderings / additions / deletions.
+    // The previous `${count}` visit-order suffix re-keyed surviving
+    // overloads whenever a sibling was added or removed, causing the
+    // substrate to tombstone + re-insert physically-unchanged elements
+    // (Fathom work row analyzers-overload-natural-key-retrofit 2.2.23).
+    // The collision-counter logic stays as a defensive fallback in case
+    // two callables produce the same signature (unusual but possible
+    // with generics / nested types).
     var seenCanonical = new Dictionary<string, string>();
     var qualifiedNameCounts = new Dictionary<string, int>();
 
@@ -237,7 +248,7 @@ static (object[] elements, object[] artifactEdges, object[] problems) DecomposeW
         var elementKind = GetElementType(node);
         if (elementKind == null) continue;
 
-        var qualifiedRaw = GetQualifiedRawName(node, rawName);
+        var qualifiedRaw = GetQualifiedRawName(node, rawName) + GetParamSignature(node);
         if (qualifiedNameCounts.TryGetValue(qualifiedRaw, out var count))
         {
             qualifiedNameCounts[qualifiedRaw] = count + 1;
@@ -273,6 +284,9 @@ static (object[] elements, object[] artifactEdges, object[] problems) DecomposeW
 
         // Type declarations emit explicit contains edges to their direct
         // members. Core treats these as authoritative for containment.
+        // Members get the same parameter-signature suffix the standalone
+        // pass appends, so the contains-edge target matches the canonical
+        // name the member resolves to when iterated independently.
         if (node is TypeDeclarationSyntax typeDecl)
         {
             var containsEdges = new List<object>(relationships);
@@ -280,7 +294,7 @@ static (object[] elements, object[] artifactEdges, object[] problems) DecomposeW
             {
                 var memberRawName = GetDeclarationName(member);
                 if (memberRawName == null) continue;
-                var memberQualified = $"{qualifiedRaw}/{memberRawName}";
+                var memberQualified = $"{qualifiedRaw}/{memberRawName}{GetParamSignature(member)}";
                 var memberCanonical = CanonicalizePath(memberQualified);
                 if (!string.IsNullOrEmpty(memberCanonical))
                 {
@@ -435,6 +449,37 @@ static string CanonicalizePath(string raw)
         .Select(Canonicalize)
         .Where(s => !string.IsNullOrEmpty(s));
     return string.Join("/", parts);
+}
+
+/// <summary>
+/// Build a parameter-type suffix `(Type1,Type2,...)` for callable
+/// declarations so overload identity stays stable across sibling
+/// reorderings / additions / deletions. Non-callable declarations
+/// (types, properties, fields, events) get the empty string.
+///
+/// Whitespace and slashes inside type names are replaced with stable
+/// placeholders so the suffix survives `Canonicalize`'s segment
+/// splitter. Generic argument punctuation (`<`, `>`, `,`) collapses to
+/// dashes through `Canonicalize` itself, same as Swift's port. Match
+/// surface mirrors Swift's `paramSignature` in nodegraph-analyzer-swift
+/// (Fathom 2.2.21).
+/// </summary>
+static string GetParamSignature(SyntaxNode node)
+{
+    SeparatedSyntaxList<ParameterSyntax>? parameters = node switch
+    {
+        BaseMethodDeclarationSyntax m => m.ParameterList.Parameters,
+        LocalFunctionStatementSyntax lf => lf.ParameterList.Parameters,
+        IndexerDeclarationSyntax idx => idx.ParameterList.Parameters,
+        _ => null
+    };
+    if (parameters == null) return string.Empty;
+    if (parameters.Value.Count == 0) return "()";
+    var types = parameters.Value.Select(p =>
+        (p.Type?.ToString() ?? "")
+            .Replace("/", "-")
+            .Replace(" ", ""));
+    return "(" + string.Join(",", types) + ")";
 }
 
 static string GetQualifiedRawName(SyntaxNode node, string rawName)
