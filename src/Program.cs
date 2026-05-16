@@ -533,6 +533,10 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
         {
             element["entryPointTrigger"] = entryPointResult.Trigger;
         }
+        if (entryPointResult.HeuristicNote != null)
+        {
+            element["entryPointHeuristicNote"] = entryPointResult.HeuristicNote;
+        }
         if (entryPointResult.Limitation != null)
         {
             limitationsAccumulator.Add(entryPointResult.Limitation);
@@ -1158,13 +1162,39 @@ static string ComputeHash(string content)
 /// library-export / other / none); E3 aggressive heuristic seed fires on
 /// suggestive class-name patterns when no first-class kind matches.
 /// </summary>
-static (string Kind, Dictionary<string, object?>? Trigger, Dictionary<string, object?>? Limitation)
+/// <summary>
+/// Compute the suggestive-name heuristic note for a class declaration,
+/// regardless of which first-class entry-point kind matched. Carries the
+/// triage signal alongside the closed-enum entryPoint kind so
+/// library-export-tagged classes still surface for catalogue growth.
+/// </summary>
+static Dictionary<string, object?>? SuggestiveNameNote(SyntaxNode node)
+{
+    if (node is not ClassDeclarationSyntax cls) return null;
+    var className = cls.Identifier.Text;
+    foreach (var pattern in EntryPointHelpers.E3ClassNamePatterns)
+    {
+        if (className.EndsWith(pattern.Suffix) && className != pattern.Suffix)
+        {
+            return new Dictionary<string, object?>
+            {
+                ["matchedHeuristic"] = $"class-name-suffix:{pattern.Suffix}",
+                ["proposedKind"] = pattern.ProposedKind,
+            };
+        }
+    }
+    return null;
+}
+
+static (string Kind, Dictionary<string, object?>? Trigger, Dictionary<string, object?>? Limitation, Dictionary<string, object?>? HeuristicNote)
     DetectEntryPoint(SyntaxNode node, string? accessibility, string filePath)
 {
+    var heuristicNote = SuggestiveNameNote(node);
+
     // E1 — main: method named Main on a class.
     if (node is MethodDeclarationSyntax m && m.Identifier.Text == "Main")
     {
-        return ("main", null, null);
+        return ("main", null, null, null);
     }
 
     // E1 — http-handler: method carrying an HTTP routing attribute.
@@ -1186,53 +1216,54 @@ static (string Kind, Dictionary<string, object?>? Trigger, Dictionary<string, ob
                     {
                         trigger["path"] = routePath;
                     }
-                    return ("http-handler", trigger, null);
+                    return ("http-handler", trigger, null, null);
                 }
             }
         }
     }
 
-    // E1 — library-export: public type at namespace level.
+    // E1 — library-export: public type at namespace level. Heuristic note
+    // rides along when the class name also matches a suggestive pattern.
     if (node is TypeDeclarationSyntax typeDecl
         && accessibility == "public"
         && typeDecl.Ancestors().OfType<TypeDeclarationSyntax>().FirstOrDefault() == null)
     {
-        return ("library-export", null, null);
+        return ("library-export", null, null, heuristicNote);
     }
 
-    // E3 — auto-discovery heuristic on class name suffix.
-    if (node is ClassDeclarationSyntax cls)
+    // E3 — auto-discovery heuristic: class-name pattern matched but no
+    // first-class kind. Emit `other` + J1 limitation per closed-enum rule.
+    if (heuristicNote != null && node is ClassDeclarationSyntax cls)
     {
         var className = cls.Identifier.Text;
-        foreach (var pattern in EntryPointHelpers.E3ClassNamePatterns)
+        var matchedHeuristic = (string)heuristicNote["matchedHeuristic"]!;
+        var proposedKind = (string)heuristicNote["proposedKind"]!;
+        var suffix = matchedHeuristic.StartsWith("class-name-suffix:")
+            ? matchedHeuristic.Substring("class-name-suffix:".Length)
+            : matchedHeuristic;
+        var lineSpan = node.GetLocation().GetLineSpan();
+        var limitation = new Dictionary<string, object?>
         {
-            if (className.EndsWith(pattern.Suffix) && className != pattern.Suffix)
+            ["kind"] = "entry-point-pattern-unmatched",
+            ["severity"] = "minor",
+            ["location"] = new Dictionary<string, object?>
             {
-                var lineSpan = node.GetLocation().GetLineSpan();
-                var limitation = new Dictionary<string, object?>
-                {
-                    ["kind"] = "entry-point-pattern-unmatched",
-                    ["severity"] = "minor",
-                    ["location"] = new Dictionary<string, object?>
-                    {
-                        ["file"] = filePath,
-                        ["startLine"] = lineSpan.StartLinePosition.Line + 1,
-                        ["endLine"] = lineSpan.EndLinePosition.Line + 1,
-                    },
-                    ["description"] = $"Class name '{className}' matches suggestive pattern '*{pattern.Suffix}' but no known framework binding",
-                    ["metadata"] = new Dictionary<string, object?>
-                    {
-                        ["matchedHeuristic"] = $"class-name-suffix:{pattern.Suffix}",
-                        ["proposedKind"] = pattern.ProposedKind,
-                        ["className"] = className,
-                    },
-                };
-                return ("other", null, limitation);
-            }
-        }
+                ["file"] = filePath,
+                ["startLine"] = lineSpan.StartLinePosition.Line + 1,
+                ["endLine"] = lineSpan.EndLinePosition.Line + 1,
+            },
+            ["description"] = $"Class name '{className}' matches suggestive pattern '*{suffix}' but no known framework binding",
+            ["metadata"] = new Dictionary<string, object?>
+            {
+                ["matchedHeuristic"] = matchedHeuristic,
+                ["proposedKind"] = proposedKind,
+                ["className"] = className,
+            },
+        };
+        return ("other", null, limitation, heuristicNote);
     }
 
-    return ("none", null, null);
+    return ("none", null, null, null);
 }
 
 /// <summary>

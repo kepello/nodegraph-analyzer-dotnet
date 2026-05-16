@@ -2,6 +2,20 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.13.0] — 2026-05-16
+
+Additive — emit `entryPointHeuristicNote` whenever a class declaration matches the E3 class-name-suffix catalogue, regardless of which first-class entry-point kind won. Pairs with `@kepello/nodegraph-analysis@2.7.0`'s new optional facet.
+
+### Added
+
+- `SuggestiveNameNote(node)` C# helper factored out of the E3 branch.
+- `DetectEntryPoint` tuple grows to `(Kind, Trigger, Limitation, HeuristicNote)`; the call site emits `entryPointHeuristicNote` as an element facet when present.
+- .NET analyzer now passes 19/19 conformance fixtures at `l5-ready` (new E3-companion fixture added).
+
+### Stress-test result
+
+PNP corpus (7,085 artifacts / 416K elements): `entryPointHeuristicNote` volume jumped from 5 (E3-only) to 809 (heuristicNote-across-all-kinds). J1 `entry-point-pattern-unmatched` limitation count unchanged at 5 — limitation gating is still `entryPoint === "other"`, the facet just preserves the signal for the cases where a first-class kind also matched. proposedKind catalogue: `controller-class: 684, service-class: 109, handler-class: 10, hub-class: 6`. PNE corpus (1,873 artifacts / 105K elements): 2 → 41.
+
 ## [0.12.0] — 2026-05-16
 
 Adds Group E (entry-point) detection. Closes Fathom row 4.4.1 — .NET analyzer now passes 18/18 conformance fixtures at the `l5-ready` level (Groups A–E).
