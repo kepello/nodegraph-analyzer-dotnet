@@ -54,17 +54,44 @@ static void RunOutput(AnalyzerArgs args, AnalyzerConfig config)
     var startTime = DateTime.UtcNow;
     var elementsEmitted = 0;
 
-    // File-level parallelism: Roslyn syntax trees are immutable and the
-    // emit pipeline has no shared state, so each file analyzes on its
-    // own thread. Console.WriteLine is atomic per call in .NET, so
-    // Emit() from multiple threads produces interleaved but
-    // individually-complete NDJSON lines.
-    Parallel.ForEach(csFiles, filePath =>
+    // Per language-conformance row 4.1.2 Stage 3b (2026-05-16) — project-
+    // level analysis pivot. Build ONE Compilation containing every .cs
+    // file in the source dir so the SemanticModel resolves cross-file
+    // references natively. Cross-file edges (calls, references, etc.)
+    // emit `targetRef` with the resolved target's file natural key.
+    //
+    // Per operator preference (notes.md 2026-05-16 project-level pivot):
+    // no per-file fallback. The Compilation is the analyzer's runtime.
+    var fileContents = new Dictionary<string, string>();
+    var syntaxTrees = new List<SyntaxTree>();
+    foreach (var filePath in csFiles)
     {
         try
         {
             var content = File.ReadAllText(filePath);
-            var artifact = BuildArtifact(content, filePath, config.IncludeComments);
+            fileContents[filePath] = content;
+            syntaxTrees.Add(CSharpSyntaxTree.ParseText(content, path: filePath));
+        }
+        catch (Exception ex)
+        {
+            Emit(new { type = "error", message = $"Failed to read source: {ex.Message}", filePath });
+        }
+    }
+    var sharedCompilation = CSharpCompilation.Create(
+        "FathomAnalysis",
+        syntaxTrees: syntaxTrees,
+        references: [MetadataReference.CreateFromFile(typeof(object).Assembly.Location)]);
+
+    // Per-file iteration. Reuses the shared Compilation so SemanticModel
+    // queries during edge emission have cross-file context. Parallel
+    // ordering preserved; Console.WriteLine is atomic per call in .NET.
+    Parallel.ForEach(syntaxTrees, tree =>
+    {
+        var filePath = tree.FilePath;
+        try
+        {
+            if (!fileContents.TryGetValue(filePath, out var content)) return;
+            var artifact = BuildArtifact(content, filePath, config.IncludeComments, sharedCompilation, tree);
             if (artifact == null) return;
             Emit(new { type = "artifact", artifact });
             Interlocked.Increment(ref elementsEmitted);
@@ -120,9 +147,15 @@ static void RunOutput(AnalyzerArgs args, AnalyzerConfig config)
 
 // --- Artifact assembly ----------------------------------------------------
 
-static object? BuildArtifact(string content, string filePath, bool includeComments)
+static object? BuildArtifact(
+    string content,
+    string filePath,
+    bool includeComments,
+    CSharpCompilation sharedCompilation,
+    SyntaxTree sharedTree)
 {
-    var (elements, artifactEdges, problems) = DecomposeWithRoslyn(content, filePath, includeComments);
+    var (elements, artifactEdges, problems) = DecomposeWithRoslyn(
+        content, filePath, includeComments, sharedCompilation, sharedTree);
 
     var artifact = new Dictionary<string, object?>
     {
@@ -185,18 +218,16 @@ static string? ExtractFileLeadingComment(string content)
 // --- Roslyn Decomposition ---
 
 static (object[] elements, object[] artifactEdges, object[] problems) DecomposeWithRoslyn(
-    string content, string filePath, bool includeComments)
+    string content, string filePath, bool includeComments,
+    CSharpCompilation sharedCompilation, SyntaxTree tree)
 {
-    var tree = CSharpSyntaxTree.ParseText(content, path: filePath);
     var root = tree.GetRoot();
 
-    // Minimal compilation for SemanticModel access (FQN + parameter
-    // types). Single-file with core references is enough — unresolved
-    // external types still produce usable display strings.
-    var compilation = CSharpCompilation.Create("FathomAnalysis",
-        syntaxTrees: [tree],
-        references: [MetadataReference.CreateFromFile(typeof(object).Assembly.Location)]);
-    var semanticModel = compilation.GetSemanticModel(tree);
+    // Single-file compilation removed; using shared multi-file Compilation
+    // for cross-file symbol resolution. Per language-conformance Stage 3b
+    // (2026-05-16 project-level pivot). SemanticModel.GetSymbolInfo() now
+    // resolves cross-file references natively.
+    var semanticModel = sharedCompilation.GetSemanticModel(tree);
     var elements = new List<object>();
     var problems = new List<object>();
     var allNames = new HashSet<string>();
@@ -280,7 +311,7 @@ static (object[] elements, object[] artifactEdges, object[] problems) DecomposeW
 
         var sourceText = node.ToFullString().Trim();
         var contentHash = ComputeHash(sourceText);
-        var relationships = ExtractRelationships(node, allNames);
+        var relationships = ExtractRelationships(node, allNames, semanticModel, filePath);
 
         // Type declarations emit explicit contains edges to their direct
         // members. Core treats these as authoritative for containment.
@@ -712,7 +743,11 @@ static string[]? ExtractParameterTypes(SemanticModel model, SyntaxNode node)
 
 // --- Edge extraction --------------------------------------------------
 
-static object[] ExtractRelationships(SyntaxNode node, HashSet<string> allNames)
+static object[] ExtractRelationships(
+    SyntaxNode node,
+    HashSet<string> allNames,
+    SemanticModel semanticModel,
+    string currentFilePath)
 {
     var relationships = new List<object>();
     var seen = new HashSet<string>();
@@ -728,6 +763,93 @@ static object[] ExtractRelationships(SyntaxNode node, HashSet<string> allNames)
         relationships.Add(new { type, subtype, targetName = canonical });
     }
 
+    // Variant that emits targetRef when the target's file is resolvable
+    // cross-file. Uses CanonicalizePath (slash-preserving) so qualified
+    // names like `Runner/Run(ParsedArgs)` canonicalize to `runner/run-parsedargs`
+    // before MakeNaturalKey substitutes `/` to `:`. Per B2.
+    void AddWithTargetRef(string type, string subtype, string rawName, string? targetFile)
+    {
+        var canonical = CanonicalizePath(rawName);
+        if (string.IsNullOrEmpty(canonical)) return;
+        var subtypeKey = $"{subtype}:{canonical}";
+        if (seen.Contains(subtypeKey)) return;
+        seen.Add(subtypeKey);
+        seen.Add($"{type}:{canonical}");
+        if (targetFile != null)
+        {
+            var targetRef = MakeNaturalKey(targetFile, canonical);
+            relationships.Add(new { type, subtype, targetName = canonical, targetRef });
+        }
+        else
+        {
+            relationships.Add(new { type, subtype, targetName = canonical });
+        }
+    }
+
+    // Project-level resolver: try to resolve a syntax node to a cross-file
+    // declaration's target file via the shared SemanticModel. Returns null
+    // for same-file targets, external library symbols, or unresolvable
+    // identifiers. Per language-conformance B2.
+    string? ResolveTargetFile(SyntaxNode refNode)
+    {
+        try
+        {
+            var symbolInfo = semanticModel.GetSymbolInfo(refNode);
+            var symbol = symbolInfo.Symbol ?? symbolInfo.CandidateSymbols.FirstOrDefault();
+            if (symbol == null) return null;
+            // Follow aliases (e.g., `using Foo = SomeNs.SomeType`) to the
+            // underlying declaration.
+            if (symbol is IAliasSymbol alias) symbol = alias.Target;
+            var declRefs = symbol.DeclaringSyntaxReferences;
+            if (declRefs.Length == 0) return null;
+            var declFilePath = declRefs[0].SyntaxTree.FilePath;
+            if (string.IsNullOrEmpty(declFilePath)) return null;
+            if (declFilePath == currentFilePath) return null;
+            return declFilePath;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    // Project-level call resolver: resolves a call site to the target
+    // method's parameter signature for A3 disambiguation AND its
+    // containing-type qualification (so cross-file calls land on the
+    // class-qualified natural key like `runner:run-parsedargs`).
+    // Returns null for unresolvable calls (dynamic dispatch, external libs).
+    (string FilePath, string QualifiedRawName)? ResolveCallTarget(SyntaxNode callee)
+    {
+        try
+        {
+            var symbolInfo = semanticModel.GetSymbolInfo(callee);
+            var symbol = symbolInfo.Symbol ?? symbolInfo.CandidateSymbols.FirstOrDefault();
+            if (symbol is not IMethodSymbol method) return null;
+            var declRefs = method.DeclaringSyntaxReferences;
+            if (declRefs.Length == 0) return null;
+            var declFilePath = declRefs[0].SyntaxTree.FilePath;
+            if (string.IsNullOrEmpty(declFilePath)) return null;
+            // Build the parameter signature in canonicalized form.
+            var paramTypes = method.Parameters.Select(p =>
+                p.Type.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat));
+            var sig = method.Parameters.Length == 0
+                ? "()"
+                : "(" + string.Join(",", paramTypes) + ")";
+            // Qualify with the containing type so the target natural key
+            // matches the declaration's class-qualified form (`runner/run-parsedargs`).
+            var rawName = method.Name + sig;
+            if (method.ContainingType != null && method.MethodKind == MethodKind.Ordinary)
+            {
+                rawName = $"{method.ContainingType.Name}/{rawName}";
+            }
+            return (declFilePath, rawName);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     if (node is TypeDeclarationSyntax typeDecl && typeDecl.BaseList != null)
     {
         var isClass = node is ClassDeclarationSyntax;
@@ -735,19 +857,19 @@ static object[] ExtractRelationships(SyntaxNode node, HashSet<string> allNames)
         for (var i = 0; i < baseTypes.Count; i++)
         {
             var name = baseTypes[i].Type.ToString().Split('<')[0].Split('.').Last();
-            if (!allNames.Contains(name)) continue;
-            // Per language-conformance B1 (Stage 3a, 2026-05-16): distinct
-            // edge types `extends` / `implements` per the contract's
-            // required vocabulary, not `inherits` with subtype.
+            // Cross-file resolver: even when the local file doesn't list
+            // the base type, the shared Compilation can resolve it.
+            var targetFile = ResolveTargetFile(baseTypes[i].Type);
+            if (!allNames.Contains(name) && targetFile == null) continue;
             var isInterfaceShaped = name.Length >= 2 && name[0] == 'I' && char.IsUpper(name[1]);
             var isExtends = isClass && i == 0 && !isInterfaceShaped;
             if (isExtends)
             {
-                Add("extends", "class", name);
+                AddWithTargetRef("extends", "class", name, targetFile);
             }
             else
             {
-                Add("implements", "explicit", name);
+                AddWithTargetRef("implements", "explicit", name, targetFile);
             }
         }
     }
@@ -761,18 +883,21 @@ static object[] ExtractRelationships(SyntaxNode node, HashSet<string> allNames)
 
     if (node is MethodDeclarationSyntax method)
     {
-        // Per language-conformance B1 / edge-subtype core vocabulary
-        // (Stage 3a, 2026-05-16): `references` with subtype `return-type`
-        // / `parameter-type`, not the legacy `uses[typeRef]`.
+        // Per language-conformance B1: `references` with subtype
+        // `return-type` / `parameter-type`. Under project-level
+        // resolution (Stage 3b), cross-file targets emit targetRef.
         var returnType = method.ReturnType.ToString().Split('<')[0].Split('.').Last();
-        if (allNames.Contains(returnType) && returnType != GetDeclarationName(node))
-            Add("references", "return-type", returnType);
+        var returnTargetFile = ResolveTargetFile(method.ReturnType);
+        if ((allNames.Contains(returnType) || returnTargetFile != null) && returnType != GetDeclarationName(node))
+            AddWithTargetRef("references", "return-type", returnType, returnTargetFile);
 
         foreach (var param in method.ParameterList.Parameters)
         {
-            var paramType = param.Type?.ToString().Split('<')[0].Split('.').Last();
-            if (paramType != null && allNames.Contains(paramType))
-                Add("references", "parameter-type", paramType);
+            if (param.Type == null) continue;
+            var paramType = param.Type.ToString().Split('<')[0].Split('.').Last();
+            var paramTargetFile = ResolveTargetFile(param.Type);
+            if (allNames.Contains(paramType) || paramTargetFile != null)
+                AddWithTargetRef("references", "parameter-type", paramType, paramTargetFile);
         }
     }
 
@@ -786,10 +911,23 @@ static object[] ExtractRelationships(SyntaxNode node, HashSet<string> allNames)
                 MemberAccessExpressionSyntax ma => ma.Name.Identifier.Text,
                 _ => null
             };
-            // Per language-conformance B1 calls subtype core (Stage 3a):
-            // `direct` (static binding), not the legacy `invokes`.
-            if (calledName != null && allNames.Contains(calledName) && calledName != GetDeclarationName(node))
+            if (calledName == null || calledName == GetDeclarationName(node)) continue;
+
+            // Project-level call resolution (Stage 3b): resolve the call's
+            // method symbol to its declaration's file + class-qualified
+            // param-disambiguated raw name. The natural key matches the
+            // declaration's emission so cross-file calls resolve correctly (B2).
+            var callTarget = ResolveCallTarget(invocation.Expression);
+            if (callTarget != null)
+            {
+                AddWithTargetRef("calls", "direct", callTarget.Value.QualifiedRawName, callTarget.Value.FilePath);
+            }
+            else if (allNames.Contains(calledName))
+            {
+                // Same-file call without resolved signature: emit bare-name
+                // form per the existing same-file convention.
                 Add("calls", "direct", calledName);
+            }
         }
     }
 
