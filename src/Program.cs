@@ -436,6 +436,69 @@ static (object[] elements, object[] artifactEdges, object[] problems) DecomposeW
             },
         };
         if (parentName != null) element["parentName"] = parentName;
+
+        // Group C body-shape facets — hasBody, isAbstract, isInterface.
+        // hasBody: callable kinds report whether they have a method body.
+        // isAbstract: classes / methods carrying the `abstract` modifier.
+        // isInterface: true for interface declarations; false for other
+        // type kinds (class / struct / enum / record).
+        if (node is MethodDeclarationSyntax m)
+        {
+            element["hasBody"] = m.Body != null || m.ExpressionBody != null;
+            if (m.Modifiers.Any(mod => mod.IsKind(SyntaxKind.AbstractKeyword)))
+            {
+                element["isAbstract"] = true;
+            }
+            else if (m.Modifiers.Any(mod => mod.IsKind(SyntaxKind.AbstractKeyword) || mod.IsKind(SyntaxKind.ExternKeyword)))
+            {
+                element["isAbstract"] = true;
+            }
+            else
+            {
+                element["isAbstract"] = false;
+            }
+        }
+        else if (node is ConstructorDeclarationSyntax ctor)
+        {
+            element["hasBody"] = ctor.Body != null || ctor.ExpressionBody != null;
+        }
+        else if (node is LocalFunctionStatementSyntax lf)
+        {
+            element["hasBody"] = lf.Body != null || lf.ExpressionBody != null;
+        }
+        else if (node is AccessorDeclarationSyntax acc)
+        {
+            element["hasBody"] = acc.Body != null || acc.ExpressionBody != null;
+        }
+        else if (node is OperatorDeclarationSyntax op)
+        {
+            element["hasBody"] = op.Body != null || op.ExpressionBody != null;
+        }
+        else if (node is ConversionOperatorDeclarationSyntax cop)
+        {
+            element["hasBody"] = cop.Body != null || cop.ExpressionBody != null;
+        }
+        else if (node is PropertyDeclarationSyntax || node is FieldDeclarationSyntax || node is EventDeclarationSyntax || node is ParameterSyntax)
+        {
+            element["hasBody"] = false;
+        }
+
+        if (node is InterfaceDeclarationSyntax)
+        {
+            element["isInterface"] = true;
+        }
+        else if (node is ClassDeclarationSyntax cls)
+        {
+            element["isInterface"] = false;
+            if (cls.Modifiers.Any(mod => mod.IsKind(SyntaxKind.AbstractKeyword)))
+            {
+                element["isAbstract"] = true;
+            }
+        }
+        else if (node is StructDeclarationSyntax || node is RecordDeclarationSyntax || node is EnumDeclarationSyntax)
+        {
+            element["isInterface"] = false;
+        }
         if (scalars != null)
         {
             element["scalars"] = new Dictionary<string, object?>
