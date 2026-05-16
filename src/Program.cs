@@ -499,6 +499,27 @@ static (object[] elements, object[] artifactEdges, object[] problems) DecomposeW
         {
             element["isInterface"] = false;
         }
+
+        // Language-conformance Group D — D1 accessibility, D3 folder, D4 qualifiedName.
+        // D2 module facet deferred (namespace+assembly composition; no
+        // immediate consumer surfaced the need).
+        var flavorsForAccessibility = declarable?.flavors as IDictionary<string, object?>
+            ?? new Dictionary<string, object?>();
+        var accessibility = DeriveAccessibility(node, new Dictionary<string, object?>(flavorsForAccessibility));
+        if (accessibility != null)
+        {
+            element["accessibility"] = accessibility;
+        }
+        var folder = Path.GetDirectoryName(filePath);
+        if (!string.IsNullOrEmpty(folder))
+        {
+            element["folder"] = folder;
+        }
+        if (fqn != null)
+        {
+            element["qualifiedName"] = fqn;
+        }
+
         if (scalars != null)
         {
             element["scalars"] = new Dictionary<string, object?>
@@ -1109,6 +1130,41 @@ static string ComputeHash(string content)
 {
     var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(content.Trim()));
     return Convert.ToHexStringLower(bytes);
+}
+
+/// <summary>
+/// Derive the language-conformance D1 accessibility facet from a syntax
+/// node + its already-populated flavors dictionary. Maps C#'s richer
+/// hierarchy (private-protected, protected-internal) onto the uniform
+/// four-value enum (public / protected / internal / private). Defaults
+/// follow C# semantics: interface members → public; class-level types →
+/// internal; class members → private.
+/// </summary>
+static string? DeriveAccessibility(SyntaxNode node, Dictionary<string, object?> flavors)
+{
+    if (flavors.TryGetValue("access", out var accessObj) && accessObj is string explicitAccess)
+    {
+        // Map C#-specific combined modifiers to the uniform enum.
+        return explicitAccess switch
+        {
+            "private-protected" => "private",
+            "protected-internal" => "internal",
+            "file" => "internal",
+            _ => explicitAccess,
+        };
+    }
+    // Defaults: interface members are implicitly public.
+    var containingType = node.Ancestors().OfType<TypeDeclarationSyntax>().FirstOrDefault();
+    if (containingType is InterfaceDeclarationSyntax) return "public";
+    // Class-level type declarations (no containing type) default to internal.
+    if (node is TypeDeclarationSyntax && containingType == null) return "internal";
+    if (node is BaseTypeDeclarationSyntax && containingType == null) return "internal";
+    // Class members default to private.
+    if (containingType != null && (node is MemberDeclarationSyntax || node is AccessorDeclarationSyntax))
+    {
+        return "private";
+    }
+    return null;
 }
 
 /// <summary>
