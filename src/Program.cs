@@ -373,6 +373,18 @@ static (object[] elements, object[] artifactEdges, object[] problems) DecomposeW
             ["observation"] = observation,
             ["edges"] = DedupeEdges(relationships).ToArray(),
             ["metadata"] = metadata,
+            // Language-conformance A2 — stable URI-safe natural key.
+            ["naturalKey"] = MakeNaturalKey(filePath, name),
+            // A6 — bare identifier (case preserved from source).
+            ["bareName"] = BareNameFrom(qualifiedRaw),
+            // A5 — language identifier; A7 — source location facet.
+            ["language"] = "csharp",
+            ["location"] = new
+            {
+                file = filePath,
+                startLine = lineSpan.StartLinePosition.Line + 1,
+                endLine = lineSpan.EndLinePosition.Line + 1,
+            },
         };
         if (parentName != null) element["parentName"] = parentName;
         if (scalars != null)
@@ -855,6 +867,35 @@ static string ComputeHash(string content)
 {
     var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(content.Trim()));
     return Convert.ToHexStringLower(bytes);
+}
+
+/// <summary>
+/// Synthesize a URI-safe natural key per the language-conformance A2/A4
+/// convention. `/` in either component substitutes to `:` so the result
+/// is safe for the substrate's cross-graph URI scheme.
+/// </summary>
+static string MakeNaturalKey(string artifactId, string name)
+{
+    var safeArtifact = artifactId.Replace('/', ':');
+    var safeName = name.Replace('/', ':');
+    return string.IsNullOrEmpty(safeName)
+        ? safeArtifact
+        : $"{safeArtifact}#{safeName}";
+}
+
+/// <summary>
+/// Recover the bare identifier from a raw declaration name. Drops the
+/// qualifying parent path (`User/Rename(string)` → `Rename(string)`)
+/// and any param-signature suffix (`Rename(string)` → `Rename`).
+/// Preserves source case for A6.
+/// </summary>
+static string BareNameFrom(string rawName)
+{
+    if (string.IsNullOrEmpty(rawName)) return rawName;
+    var lastSlash = rawName.LastIndexOf('/');
+    var tail = lastSlash < 0 ? rawName : rawName.Substring(lastSlash + 1);
+    var parenIdx = tail.IndexOf('(');
+    return parenIdx < 0 ? tail : tail.Substring(0, parenIdx);
 }
 
 static string Canonicalize(string raw)
