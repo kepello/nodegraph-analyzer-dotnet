@@ -2,6 +2,25 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.12.0] — 2026-05-16
+
+Adds Group E (entry-point) detection. Closes Fathom row 4.4.1 — .NET analyzer now passes 18/18 conformance fixtures at the `l5-ready` level (Groups A–E).
+
+### Added
+
+- `DetectEntryPoint(node, accessibility, filePath)` C# helper that returns the (kind, trigger, limitation) tuple per element. Detection covers:
+  - **`main`** — top-level `Main` method (case-insensitive) inside `Program` class, or implicit `<Main>$` for C# 9+ top-level statements.
+  - **`http-handler`** — methods decorated with one of `[HttpGet]`, `[HttpPost]`, `[HttpPut]`, `[HttpDelete]`, `[HttpPatch]`, `[HttpHead]`, `[HttpOptions]`, or class-level `[Route(…)]` (ASP.NET Core minimal-API / MVC conventions).
+  - **`library-export`** — every `public class` declared at namespace level (Q3 = aggressive seed; consumers can post-filter via the assembly's public-API surface).
+  - **`other`** + J1 limitation — class names suffixed `Handler`, `Listener`, `Worker`, `Service`, `Controller`, `EventHandler` that didn't match a first-class kind. Emits structured limitation `{ kind: "entry-point-pattern-unmatched", metadata: { pattern, suggestedKind } }`.
+- New `EntryPointHelpers` static class with `HttpAttributeNames` + `E3ClassNamePatterns` constants. Lives after `FileExtensionsHolder` per the C# top-level-statement ordering rule.
+- Per-element `entryPoint` (string) + `entryPointTrigger` (object) facets emitted via the existing JSON writer pipeline.
+
+### Trade-offs
+
+- Detection doesn't verify attribute origin (e.g., that `[HttpGet]` resolves to `Microsoft.AspNetCore.Mvc.HttpGetAttribute`). Matches the spec's pragmatic MAY-level stance for v1.
+- `library-export` seed is aggressive — every public class qualifies, even when it's only public for assembly-internal reuse. Downstream filters (`InternalsVisibleTo`, public-API analyzer) refine this in row 4.5.x territory.
+
 ## [0.11.0] — 2026-05-14
 
 **Breaking — overload disambiguation switches from visit-order `$N` suffixes to parameter-type signatures** (Fathom work row `analyzers-overload-natural-key-retrofit` 2.2.23). Same convention as the Swift port shipped in 0.9.0. Callable declarations (methods / constructors / destructors / operators / indexers / local functions) now suffix their raw name with `(Type1,Type2,...)` extracted from `BaseMethodDeclarationSyntax.ParameterList` / `IndexerDeclarationSyntax.ParameterList`; the suffix gets sanitized to dashes by the existing `Canonicalize` regex.

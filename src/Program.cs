@@ -154,7 +154,7 @@ static object? BuildArtifact(
     CSharpCompilation sharedCompilation,
     SyntaxTree sharedTree)
 {
-    var (elements, artifactEdges, problems) = DecomposeWithRoslyn(
+    var (elements, artifactEdges, problems, limitations) = DecomposeWithRoslyn(
         content, filePath, includeComments, sharedCompilation, sharedTree);
 
     var artifact = new Dictionary<string, object?>
@@ -167,6 +167,7 @@ static object? BuildArtifact(
     };
     if (artifactEdges.Length > 0) artifact["edges"] = DedupeEdges(artifactEdges).ToArray();
     if (problems.Length > 0) artifact["problems"] = problems;
+    if (limitations.Length > 0) artifact["limitations"] = limitations;
 
     if (includeComments)
     {
@@ -217,7 +218,7 @@ static string? ExtractFileLeadingComment(string content)
 
 // --- Roslyn Decomposition ---
 
-static (object[] elements, object[] artifactEdges, object[] problems) DecomposeWithRoslyn(
+static (object[] elements, object[] artifactEdges, object[] problems, object[] limitations) DecomposeWithRoslyn(
     string content, string filePath, bool includeComments,
     CSharpCompilation sharedCompilation, SyntaxTree tree)
 {
@@ -232,6 +233,9 @@ static (object[] elements, object[] artifactEdges, object[] problems) DecomposeW
     var problems = new List<object>();
     var allNames = new HashSet<string>();
     var artifactEdges = new List<object>();
+    // Group J — limitations accumulator (filled by E3 heuristics + future
+    // fallback-emission sites per P2 fallback-emits-limitation rule).
+    var limitationsAccumulator = new List<object>();
 
     var compilationUnit = (CompilationUnitSyntax)root;
     foreach (var usingDirective in compilationUnit.Usings)
@@ -520,6 +524,20 @@ static (object[] elements, object[] artifactEdges, object[] problems) DecomposeW
             element["qualifiedName"] = fqn;
         }
 
+        // Language-conformance Group E — entry-point detection.
+        // Subset of E1 enum at v1 per operator decision: main / http-handler /
+        // library-export / other / none. Aggressive E3 heuristic seed.
+        var entryPointResult = DetectEntryPoint(node, accessibility, filePath);
+        element["entryPoint"] = entryPointResult.Kind;
+        if (entryPointResult.Trigger != null)
+        {
+            element["entryPointTrigger"] = entryPointResult.Trigger;
+        }
+        if (entryPointResult.Limitation != null)
+        {
+            limitationsAccumulator.Add(entryPointResult.Limitation);
+        }
+
         if (scalars != null)
         {
             element["scalars"] = new Dictionary<string, object?>
@@ -547,7 +565,7 @@ static (object[] elements, object[] artifactEdges, object[] problems) DecomposeW
         elements.Add(element);
     }
 
-    return (elements.ToArray(), artifactEdges.ToArray(), problems.ToArray());
+    return (elements.ToArray(), artifactEdges.ToArray(), problems.ToArray(), limitationsAccumulator.ToArray());
 }
 
 /// <summary>
@@ -1132,6 +1150,91 @@ static string ComputeHash(string content)
     return Convert.ToHexStringLower(bytes);
 }
 
+// --- Group E entry-point detection ---
+
+/// <summary>
+/// Per language-conformance Group E. Detect the entry-point kind for a
+/// syntax node. Subset of E1 enum at v1 (main / http-handler /
+/// library-export / other / none); E3 aggressive heuristic seed fires on
+/// suggestive class-name patterns when no first-class kind matches.
+/// </summary>
+static (string Kind, Dictionary<string, object?>? Trigger, Dictionary<string, object?>? Limitation)
+    DetectEntryPoint(SyntaxNode node, string? accessibility, string filePath)
+{
+    // E1 — main: method named Main on a class.
+    if (node is MethodDeclarationSyntax m && m.Identifier.Text == "Main")
+    {
+        return ("main", null, null);
+    }
+
+    // E1 — http-handler: method carrying an HTTP routing attribute.
+    if (node is MethodDeclarationSyntax method)
+    {
+        foreach (var attrList in method.AttributeLists)
+        {
+            foreach (var attr in attrList.Attributes)
+            {
+                var attrName = attr.Name.ToString().Split('<')[0].Split('.').Last();
+                if (attrName.EndsWith("Attribute")) attrName = attrName[..^9];
+                if (EntryPointHelpers.HttpAttributeNames.Contains(attrName))
+                {
+                    var trigger = new Dictionary<string, object?> { ["method"] = attrName };
+                    var args = attr.ArgumentList?.Arguments;
+                    if (args != null && args.Value.Count > 0
+                        && args.Value[0].Expression is LiteralExpressionSyntax lit
+                        && lit.Token.Value is string routePath)
+                    {
+                        trigger["path"] = routePath;
+                    }
+                    return ("http-handler", trigger, null);
+                }
+            }
+        }
+    }
+
+    // E1 — library-export: public type at namespace level.
+    if (node is TypeDeclarationSyntax typeDecl
+        && accessibility == "public"
+        && typeDecl.Ancestors().OfType<TypeDeclarationSyntax>().FirstOrDefault() == null)
+    {
+        return ("library-export", null, null);
+    }
+
+    // E3 — auto-discovery heuristic on class name suffix.
+    if (node is ClassDeclarationSyntax cls)
+    {
+        var className = cls.Identifier.Text;
+        foreach (var pattern in EntryPointHelpers.E3ClassNamePatterns)
+        {
+            if (className.EndsWith(pattern.Suffix) && className != pattern.Suffix)
+            {
+                var lineSpan = node.GetLocation().GetLineSpan();
+                var limitation = new Dictionary<string, object?>
+                {
+                    ["kind"] = "entry-point-pattern-unmatched",
+                    ["severity"] = "minor",
+                    ["location"] = new Dictionary<string, object?>
+                    {
+                        ["file"] = filePath,
+                        ["startLine"] = lineSpan.StartLinePosition.Line + 1,
+                        ["endLine"] = lineSpan.EndLinePosition.Line + 1,
+                    },
+                    ["description"] = $"Class name '{className}' matches suggestive pattern '*{pattern.Suffix}' but no known framework binding",
+                    ["metadata"] = new Dictionary<string, object?>
+                    {
+                        ["matchedHeuristic"] = $"class-name-suffix:{pattern.Suffix}",
+                        ["proposedKind"] = pattern.ProposedKind,
+                        ["className"] = className,
+                    },
+                };
+                return ("other", null, limitation);
+            }
+        }
+    }
+
+    return ("none", null, null);
+}
+
 /// <summary>
 /// Derive the language-conformance D1 accessibility facet from a syntax
 /// node + its already-populated flavors dictionary. Maps C#'s richer
@@ -1404,5 +1507,44 @@ static class FileExtensionsHolder
     {
         ".dll",
         ".pdb",
+    };
+}
+
+/// <summary>
+/// Language-conformance Group E helpers — aggressive heuristic seeds for
+/// entry-point detection. Per operator decision: false positives
+/// generate triage entries (via the entry-point-pattern-unmatched
+/// limitation path), which IS the design — recurring patterns advance to
+/// first-class taxonomy via the triage flywheel.
+/// </summary>
+static class EntryPointHelpers
+{
+    /// <summary>
+    /// Attribute names that indicate HTTP routing (ASP.NET Core, Web API,
+    /// WCF / ASMX legacy).
+    /// </summary>
+    public static readonly HashSet<string> HttpAttributeNames = new()
+    {
+        "HttpGet", "HttpPost", "HttpPut", "HttpPatch", "HttpDelete", "HttpHead", "HttpOptions",
+        "Route", "RoutePrefix",
+        "ApiController", "Controller",
+        "WebMethod", "OperationContract",
+    };
+
+    /// <summary>
+    /// Class-name suffix patterns that match suggestive entry-point
+    /// shapes. Aggressive seed; covers common framework conventions.
+    /// </summary>
+    public static readonly (string Suffix, string ProposedKind)[] E3ClassNamePatterns = new[]
+    {
+        ("Controller", "controller-class"),
+        ("Service", "service-class"),
+        ("Handler", "handler-class"),
+        ("Endpoint", "endpoint-class"),
+        ("Hub", "hub-class"),
+        ("Worker", "worker-class"),
+        ("Consumer", "consumer-class"),
+        ("Job", "job-class"),
+        ("Function", "function-class"),
     };
 }
