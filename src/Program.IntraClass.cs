@@ -109,12 +109,23 @@ static class IntraClassHelpers
     /// edges it implies. Each member-name appears at most once per
     /// edge type; the caller canonicalizes targetName before emitting.
     /// </summary>
-    public static List<(string Type, string Target)> ExtractEdges(
+    public static List<(string Type, string? Subtype, string Target)> ExtractEdges(
         SyntaxNode body,
         ClassMemberIndex members)
     {
-        var accessedFields = new HashSet<string>();
+        // Per language-conformance B1 accessesField subtype core (Stage 3a,
+        // 2026-05-16): each access is classified as `read`, `write`, or
+        // `readwrite` based on the surrounding syntactic context.
+        var fieldAccess = new Dictionary<string, (bool Read, bool Write)>();
         var calledMethods = new HashSet<string>();
+
+        void RecordFieldAccess(string name, string kind)
+        {
+            fieldAccess.TryGetValue(name, out var existing);
+            if (kind == "read" || kind == "readwrite") existing.Read = true;
+            if (kind == "write" || kind == "readwrite") existing.Write = true;
+            fieldAccess[name] = existing;
+        }
 
         foreach (var node in body.DescendantNodes())
         {
@@ -133,7 +144,7 @@ static class IntraClassHelpers
                 }
                 else if (!isCallee && members.Fields.Contains(name))
                 {
-                    accessedFields.Add(name);
+                    RecordFieldAccess(name, ClassifyFieldAccess(access));
                 }
                 else if (!isCallee && members.Methods.Contains(name))
                 {
@@ -181,7 +192,7 @@ static class IntraClassHelpers
 
                 if (members.Fields.Contains(name))
                 {
-                    accessedFields.Add(name);
+                    RecordFieldAccess(name, ClassifyFieldAccess(id));
                 }
                 else
                 {
@@ -192,10 +203,46 @@ static class IntraClassHelpers
             }
         }
 
-        var edges = new List<(string Type, string Target)>();
-        foreach (var f in accessedFields) edges.Add(("accessesField", f));
-        foreach (var m in calledMethods) edges.Add(("callsMethod", m));
+        var edges = new List<(string Type, string? Subtype, string Target)>();
+        foreach (var (name, kinds) in fieldAccess)
+        {
+            var subtype = kinds.Read && kinds.Write ? "readwrite" : kinds.Write ? "write" : "read";
+            edges.Add(("accessesField", subtype, name));
+        }
+        foreach (var m in calledMethods) edges.Add(("callsMethod", null, m));
         return edges;
+    }
+
+    /// <summary>
+    /// Determine read / write / readwrite for a field access based on
+    /// the surrounding syntax. Per language-conformance B1 accessesField
+    /// subtype core vocabulary (Stage 3a).
+    /// </summary>
+    static string ClassifyFieldAccess(SyntaxNode access)
+    {
+        var parent = access.Parent;
+        if (parent is null) return "read";
+
+        // Assignment: LHS of = is write; LHS of compound assignment (+=, -=, etc.) is readwrite.
+        if (parent is AssignmentExpressionSyntax assign && assign.Left == access)
+        {
+            if (assign.IsKind(SyntaxKind.SimpleAssignmentExpression)) return "write";
+            return "readwrite";
+        }
+
+        // ++ / -- (prefix or postfix) — readwrite.
+        if (parent is PostfixUnaryExpressionSyntax
+            && (parent.IsKind(SyntaxKind.PostIncrementExpression) || parent.IsKind(SyntaxKind.PostDecrementExpression)))
+        {
+            return "readwrite";
+        }
+        if (parent is PrefixUnaryExpressionSyntax
+            && (parent.IsKind(SyntaxKind.PreIncrementExpression) || parent.IsKind(SyntaxKind.PreDecrementExpression)))
+        {
+            return "readwrite";
+        }
+
+        return "read";
     }
 
     /// <summary>

@@ -330,12 +330,30 @@ static (object[] elements, object[] artifactEdges, object[] problems) DecomposeW
             if (containingType != null)
             {
                 var memberIndex = IntraClassHelpers.BuildIndex(containingType);
+                var className = containingType.Identifier.Text;
+                var canonicalClass = Canonicalize(className);
                 var rels = relationships.ToList();
-                foreach (var (edgeType, target) in IntraClassHelpers.ExtractEdges(node, memberIndex))
+                foreach (var (edgeType, subtype, target) in IntraClassHelpers.ExtractEdges(node, memberIndex))
                 {
                     var canonicalTarget = Canonicalize(target);
                     if (string.IsNullOrEmpty(canonicalTarget)) continue;
-                    rels.Add(new { type = edgeType, targetName = canonicalTarget });
+                    // Per language-conformance B1: qualify intra-class
+                    // targets with the class name (`class/member`) so the
+                    // emitted targetName resolves to the actual element's
+                    // natural key. Without this, `accessesField` edges
+                    // stayed dangling. Mirrors the TS analyzer's
+                    // intra-class edge composition (Fathom row 3.2.1).
+                    var qualifiedTarget = string.IsNullOrEmpty(canonicalClass)
+                        ? canonicalTarget
+                        : $"{canonicalClass}/{canonicalTarget}";
+                    if (subtype is null)
+                    {
+                        rels.Add(new { type = edgeType, targetName = qualifiedTarget });
+                    }
+                    else
+                    {
+                        rels.Add(new { type = edgeType, subtype, targetName = qualifiedTarget });
+                    }
                 }
                 relationships = rels.ToArray();
             }
@@ -718,9 +736,19 @@ static object[] ExtractRelationships(SyntaxNode node, HashSet<string> allNames)
         {
             var name = baseTypes[i].Type.ToString().Split('<')[0].Split('.').Last();
             if (!allNames.Contains(name)) continue;
+            // Per language-conformance B1 (Stage 3a, 2026-05-16): distinct
+            // edge types `extends` / `implements` per the contract's
+            // required vocabulary, not `inherits` with subtype.
             var isInterfaceShaped = name.Length >= 2 && name[0] == 'I' && char.IsUpper(name[1]);
-            var subtype = (isClass && i == 0 && !isInterfaceShaped) ? "extends" : "implements";
-            Add("inherits", subtype, name);
+            var isExtends = isClass && i == 0 && !isInterfaceShaped;
+            if (isExtends)
+            {
+                Add("extends", "class", name);
+            }
+            else
+            {
+                Add("implements", "explicit", name);
+            }
         }
     }
 
@@ -733,15 +761,18 @@ static object[] ExtractRelationships(SyntaxNode node, HashSet<string> allNames)
 
     if (node is MethodDeclarationSyntax method)
     {
+        // Per language-conformance B1 / edge-subtype core vocabulary
+        // (Stage 3a, 2026-05-16): `references` with subtype `return-type`
+        // / `parameter-type`, not the legacy `uses[typeRef]`.
         var returnType = method.ReturnType.ToString().Split('<')[0].Split('.').Last();
         if (allNames.Contains(returnType) && returnType != GetDeclarationName(node))
-            Add("uses", "typeRef", returnType);
+            Add("references", "return-type", returnType);
 
         foreach (var param in method.ParameterList.Parameters)
         {
             var paramType = param.Type?.ToString().Split('<')[0].Split('.').Last();
             if (paramType != null && allNames.Contains(paramType))
-                Add("uses", "typeRef", paramType);
+                Add("references", "parameter-type", paramType);
         }
     }
 
@@ -755,8 +786,10 @@ static object[] ExtractRelationships(SyntaxNode node, HashSet<string> allNames)
                 MemberAccessExpressionSyntax ma => ma.Name.Identifier.Text,
                 _ => null
             };
+            // Per language-conformance B1 calls subtype core (Stage 3a):
+            // `direct` (static binding), not the legacy `invokes`.
             if (calledName != null && allNames.Contains(calledName) && calledName != GetDeclarationName(node))
-                Add("calls", "invokes", calledName);
+                Add("calls", "direct", calledName);
         }
     }
 
@@ -764,8 +797,9 @@ static object[] ExtractRelationships(SyntaxNode node, HashSet<string> allNames)
         foreach (var creation in node.DescendantNodes().OfType<ObjectCreationExpressionSyntax>())
         {
             var typeName = creation.Type.ToString().Split('<')[0].Split('.').Last();
+            // B1 calls subtype core (Stage 3a): `constructor` for `new T(...)`.
             if (allNames.Contains(typeName) && typeName != GetDeclarationName(node))
-                Add("calls", "instantiates", typeName);
+                Add("calls", "constructor", typeName);
         }
     }
 
@@ -775,7 +809,10 @@ static object[] ExtractRelationships(SyntaxNode node, HashSet<string> allNames)
         {
             if (member.Modifiers.Any(m => m.IsKind(SyntaxKind.OverrideKeyword)))
             {
-                Add("inherits", "overrides", member.Identifier.Text);
+                // Override semantics live on the method element's isOverride
+                // facet per F2; no edge emitted. The legacy
+                // `inherits[overrides]` edge is dropped per Stage 3a.
+                _ = member;
             }
         }
     }
@@ -808,7 +845,7 @@ static object[] ExtractRelationships(SyntaxNode node, HashSet<string> allNames)
             {
                 var constraintName = constraint.Type.ToString().Split('<')[0].Split('.').Last();
                 if (allNames.Contains(constraintName) && constraintName != GetDeclarationName(node))
-                    Add("uses", "genericConstraint", constraintName);
+                    Add("references", "generic-constraint", constraintName);
             }
         }
     }
@@ -820,8 +857,12 @@ static object[] ExtractRelationships(SyntaxNode node, HashSet<string> allNames)
             {
                 var attrName = attr.Name.ToString().Split('<')[0].Split('.').Last();
                 if (attrName.EndsWith("Attribute")) attrName = attrName[..^9];
-                if (allNames.Contains(attrName))
-                    Add("uses", "decorates", attrName);
+                // Per language-conformance A8 (Stage 2 work):
+                // attributes are surfaced via the element's `annotations`
+                // facet, not via a `uses[decorates]` edge. No edge emitted
+                // here; the full attribute-extraction pass is deferred to
+                // Stage 2 implementation.
+                _ = attrName;
             }
         }
     }
