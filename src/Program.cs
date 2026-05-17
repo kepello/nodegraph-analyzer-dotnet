@@ -524,6 +524,55 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
             element["qualifiedName"] = fqn;
         }
 
+        // Language-conformance Group F — type-system facets.
+        // F2 dispatchKind on dispatchable callables; F3 callableRole on
+        // every callable; F5 isAsync on methods carrying the async
+        // modifier. F1 type-position references already emitted as
+        // `references` edges (wired in 4.1.2).
+        if (node is MethodDeclarationSyntax methodForF)
+        {
+            // F2 dispatchKind for methods.
+            string dispatch;
+            if (methodForF.Modifiers.Any(mod => mod.IsKind(SyntaxKind.AbstractKeyword)))
+                dispatch = "abstract";
+            else if (methodForF.Modifiers.Any(mod => mod.IsKind(SyntaxKind.StaticKeyword)))
+                dispatch = "static";
+            else if (methodForF.Modifiers.Any(mod => mod.IsKind(SyntaxKind.OverrideKeyword))
+                && methodForF.Modifiers.Any(mod => mod.IsKind(SyntaxKind.SealedKeyword)))
+                dispatch = "final";
+            else if (methodForF.Modifiers.Any(mod => mod.IsKind(SyntaxKind.OverrideKeyword)))
+                dispatch = "override";
+            else if (methodForF.Modifiers.Any(mod => mod.IsKind(SyntaxKind.VirtualKeyword)))
+                dispatch = "virtual";
+            else if (methodForF.Parent is InterfaceDeclarationSyntax)
+                dispatch = "virtual";
+            else
+                // C# instance methods without virtual/override are
+                // statically dispatched (no override possible without
+                // virtual / abstract base).
+                dispatch = "static";
+            element["dispatchKind"] = dispatch;
+
+            // F3 callableRole — none for plain methods. (Constructor
+            // role lives on ConstructorDeclarationSyntax branch below.)
+            element["callableRole"] = "none";
+
+            // F5 isAsync — `async` modifier.
+            if (methodForF.Modifiers.Any(mod => mod.IsKind(SyntaxKind.AsyncKeyword)))
+            {
+                element["isAsync"] = true;
+            }
+            else
+            {
+                element["isAsync"] = false;
+            }
+        }
+        else if (node is ConstructorDeclarationSyntax)
+        {
+            element["dispatchKind"] = "static";
+            element["callableRole"] = "constructor";
+        }
+
         // Language-conformance Group E — entry-point detection.
         // Subset of E1 enum at v1 per operator decision: main / http-handler /
         // library-export / other / none. Aggressive E3 heuristic seed.

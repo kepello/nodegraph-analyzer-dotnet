@@ -2,6 +2,21 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.16.0] — 2026-05-16
+
+Additive — Group F type-system facets. Closes part of Fathom row 4.5.1. .NET analyzer now passes 24/24 conformance fixtures at `l6-ready`.
+
+### Added
+
+- **F2 `dispatchKind`** on methods + constructors. Full C# dispatch matrix covered: `abstract` (abstract modifier), `static` (static modifier), `virtual` (virtual modifier or interface method), `override` (override modifier without sealed), `final` (sealed override), `static` for plain instance methods (no virtual/override — can't be overridden without a virtual/abstract base), `static` for constructors.
+- **F3 `callableRole`** — `constructor` for ConstructorDeclarationSyntax; `none` for plain methods. Static-factory / builder-step / conversion deferred.
+- **F5 `isAsync`** — true on methods carrying the `async` modifier; false otherwise. Constructors can't be async in C#.
+
+### Notes
+
+- F1 already shipped via 4.1.2's `references` edge emission with `parameter-type` / `return-type` subtypes; new fixtures reuse B1/B2 coverage.
+- F4 (generic instantiations — SHOULD level) deferred to a separate row.
+
 ## [0.15.1] — 2026-05-16
 
 Dropped — `Handler` removed from the E3 class-name catalogue. Closes Fathom row 4.4.2.3. Matches the parallel TS analyzer 0.15.1 ship for cross-language consistency. See that package's changelog for triage evidence + decision rationale.
