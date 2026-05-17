@@ -2,6 +2,18 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.15.0] — 2026-05-16
+
+Additive — .NET analyzer emits `entryPoint: "wcf-service"` on top-level public types declared in a `.svc.cs` source file. Closes Fathom row 4.4.2.2.
+
+### Changed
+
+- New detection branch in `DetectEntryPoint` fires for `TypeDeclarationSyntax` where (a) accessibility is `public`, (b) `filePath` ends in `.svc.cs` (case-insensitive), and (c) the type is at namespace level (no enclosing type). Priority: after `http-controller`, BEFORE `library-export`. heuristicNote still rides along.
+
+### Stress-test verification
+
+PNP re-run: 30 classes shifted from `library-export` → `wcf-service` (8250 → 8220). All 10 spot-checked samples are real WCF service implementations (`CalendarService.svc.cs`, `RampService.svc.cs`, `MyPatientNowMessageService.svc.cs`, etc. under `PatientNowLib/`). PNE has 0 wcf-service — no `.svc.cs` files in the legacy codebase. J1 limitations unchanged.
+
 ## [0.14.0] — 2026-05-16
 
 Additive — .NET analyzer emits `entryPoint: "http-controller"` on classes whose name ends in `Controller`. Closes Fathom row 4.4.2.1.

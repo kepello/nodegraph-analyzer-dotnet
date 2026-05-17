@@ -1236,6 +1236,19 @@ static (string Kind, Dictionary<string, object?>? Trigger, Dictionary<string, ob
         }
     }
 
+    // E1 — wcf-service: top-level public type declared in a `.svc.cs`
+    // source file. Per row 4.4.2.2 — PNE/PNP triage surfaced WCF
+    // services as a distinct, file-path-detectable subset of the broad
+    // `service-class` heuristic. heuristicNote rides along for any
+    // residual signal interest.
+    if (node is TypeDeclarationSyntax wcfType
+        && accessibility == "public"
+        && filePath.EndsWith(".svc.cs", System.StringComparison.OrdinalIgnoreCase)
+        && wcfType.Ancestors().OfType<TypeDeclarationSyntax>().FirstOrDefault() == null)
+    {
+        return ("wcf-service", null, null, heuristicNote);
+    }
+
     // E1 — library-export: public type at namespace level. Heuristic note
     // rides along when the class name also matches a suggestive pattern.
     if (node is TypeDeclarationSyntax typeDecl
