@@ -1598,11 +1598,18 @@ static class EntryPointHelpers
     /// removed from this catalogue. The dedicated detection branch
     /// fires earlier in DetectEntryPoint so Controller-named classes
     /// never reach E3 here.
+    ///
+    /// `Handler` was DROPPED in row 4.4.2.3 — PNE+PNP triage found 26
+    /// cases spanning ≥5 overlapping semantics (HTTP message handlers,
+    /// database wrappers, DICOM file-format handlers, native event-
+    /// callback handlers, misc). Triage signal too noisy to act on;
+    /// narrowing to MessageHandler / EventHandler would have caught
+    /// zero cases in the observed corpora. Re-introduce as a specific
+    /// subkind if a future framework binding warrants it.
     /// </summary>
     public static readonly (string Suffix, string ProposedKind)[] E3ClassNamePatterns = new[]
     {
         ("Service", "service-class"),
-        ("Handler", "handler-class"),
         ("Endpoint", "endpoint-class"),
         ("Hub", "hub-class"),
         ("Worker", "worker-class"),

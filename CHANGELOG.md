@@ -2,6 +2,12 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.15.1] — 2026-05-16
+
+Dropped — `Handler` removed from the E3 class-name catalogue. Closes Fathom row 4.4.2.3. Matches the parallel TS analyzer 0.15.1 ship for cross-language consistency. See that package's changelog for triage evidence + decision rationale.
+
+E3 catalogue now: `Service`, `Endpoint`, `Hub`, `Worker`, `Consumer`, `Job`, `Function`.
+
 ## [0.15.0] — 2026-05-16
 
 Additive — .NET analyzer emits `entryPoint: "wcf-service"` on top-level public types declared in a `.svc.cs` source file. Closes Fathom row 4.4.2.2.
