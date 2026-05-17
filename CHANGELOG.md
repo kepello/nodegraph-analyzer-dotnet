@@ -2,6 +2,19 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.14.0] — 2026-05-16
+
+Additive — .NET analyzer emits `entryPoint: "http-controller"` on classes whose name ends in `Controller`. Closes Fathom row 4.4.2.1.
+
+### Changed
+
+- New detection branch in `DetectEntryPoint` fires for `ClassDeclarationSyntax` whose identifier ends with `Controller` (excluding the bare name). Priority: after `main` + method-level `http-handler`, BEFORE `library-export`. Returns `("http-controller", null, null, heuristicNote)`.
+- Removed `Controller` from `EntryPointHelpers.E3ClassNamePatterns`; the dedicated branch fires first. Catalogue keeps `Service`, `Handler`, `Endpoint`, `Hub`, `Worker`, `Consumer`, `Job`, `Function`.
+
+### Stress-test verification
+
+PNE+PNP re-run after the shift: 684 PNP Controllers + 4 PNE Controllers (= 688 total, matching the 4.4.2 triage prediction) shifted from `library-export` → `http-controller`. heuristicNote signal dropped from 850 → 162 total records — Controller no longer clutters the triage flywheel. J1 limitations unchanged at 7.
+
 ## [0.13.0] — 2026-05-16
 
 Additive — emit `entryPointHeuristicNote` whenever a class declaration matches the E3 class-name-suffix catalogue, regardless of which first-class entry-point kind won. Pairs with `@kepello/nodegraph-analysis@2.7.0`'s new optional facet.

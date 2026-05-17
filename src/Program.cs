@@ -1222,6 +1222,20 @@ static (string Kind, Dictionary<string, object?>? Trigger, Dictionary<string, ob
         }
     }
 
+    // E1 — http-controller: class whose name ends in `Controller`. Per
+    // row 4.4.2.1 — promoted out of the E3 catalogue based on PNE/PNP
+    // triage (688 unambiguous cases). Fires whether the class is public
+    // or not; library-export comes after so Controller wins.
+    // heuristicNote rides along for the triage flywheel.
+    if (node is ClassDeclarationSyntax controllerCls)
+    {
+        var controllerName = controllerCls.Identifier.Text;
+        if (controllerName.EndsWith("Controller") && controllerName != "Controller")
+        {
+            return ("http-controller", null, null, heuristicNote);
+        }
+    }
+
     // E1 — library-export: public type at namespace level. Heuristic note
     // rides along when the class name also matches a suggestive pattern.
     if (node is TypeDeclarationSyntax typeDecl
@@ -1565,10 +1579,15 @@ static class EntryPointHelpers
     /// <summary>
     /// Class-name suffix patterns that match suggestive entry-point
     /// shapes. Aggressive seed; covers common framework conventions.
+    ///
+    /// `Controller` was promoted to first-class `http-controller` E1
+    /// kind in row 4.4.2.1 (688 unambiguous PNE+PNP cases) and
+    /// removed from this catalogue. The dedicated detection branch
+    /// fires earlier in DetectEntryPoint so Controller-named classes
+    /// never reach E3 here.
     /// </summary>
     public static readonly (string Suffix, string ProposedKind)[] E3ClassNamePatterns = new[]
     {
-        ("Controller", "controller-class"),
         ("Service", "service-class"),
         ("Handler", "handler-class"),
         ("Endpoint", "endpoint-class"),
