@@ -573,6 +573,20 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
             element["callableRole"] = "constructor";
         }
 
+        // Language-conformance Group G — canonical documentation.
+        // G1 `documentation` carries parsed XML-doc tag content; G2
+        // `documentationCoverage` is true iff G1 was emitted.
+        var canonicalDoc = ExtractCanonicalDocumentation(node);
+        if (canonicalDoc != null)
+        {
+            element["documentation"] = canonicalDoc;
+            element["documentationCoverage"] = true;
+        }
+        else
+        {
+            element["documentationCoverage"] = false;
+        }
+
         // Language-conformance Group E — entry-point detection.
         // Subset of E1 enum at v1 per operator decision: main / http-handler /
         // library-export / other / none. Aggressive E3 heuristic seed.
@@ -656,6 +670,143 @@ static bool IsCommentTrivia(SyntaxTrivia trivia) =>
     || trivia.IsKind(SyntaxKind.MultiLineCommentTrivia)
     || trivia.IsKind(SyntaxKind.SingleLineDocumentationCommentTrivia)
     || trivia.IsKind(SyntaxKind.MultiLineDocumentationCommentTrivia);
+
+/// <summary>
+/// G1 canonical documentation extraction. Returns the parsed
+/// triple-slash XML-doc content in the unified shape, or null when
+/// the element has no doc comment.
+///
+/// Source convention: C# `///` lines forming a contiguous block
+/// immediately before the declaration. Each line is parsed as a
+/// fragment of an XML document. We collect the canonical tags:
+///   <summary>        → summary (required when present)
+///   <param name="X"> → params[X]
+///   <returns>        → returns
+///   <exception cref="X"> → throws[]
+///   <example>        → examples[]
+/// Unknown tags are dropped (consumers care about the canonical shape).
+/// </summary>
+static Dictionary<string, object?>? ExtractCanonicalDocumentation(SyntaxNode node)
+{
+    var leading = node.GetLeadingTrivia();
+    if (leading.Count == 0) return null;
+
+    // Concatenate all `///` line content into one XML fragment string,
+    // stripping the leading slash-slash-slash + one optional space per
+    // line. Multi-line doc trivia get the same treatment via their
+    // text shape.
+    var sb = new StringBuilder();
+    bool any = false;
+    foreach (var trivia in leading)
+    {
+        if (trivia.IsKind(SyntaxKind.SingleLineDocumentationCommentTrivia)
+            || trivia.IsKind(SyntaxKind.MultiLineDocumentationCommentTrivia))
+        {
+            foreach (var line in trivia.ToFullString().Split('\n'))
+            {
+                // Strip leading whitespace + `///` (or `/**`/`*/` for
+                // multi-line) + one optional space.
+                var stripped = System.Text.RegularExpressions.Regex.Replace(
+                    line, @"^\s*(///|/\*\*?|\*+/|\*)\s?", "");
+                sb.Append(stripped);
+                sb.Append('\n');
+                any = true;
+            }
+        }
+    }
+    if (!any) return null;
+
+    var xml = sb.ToString().Trim();
+    if (xml.Length == 0) return null;
+
+    return ParseXmlDocFragment(xml);
+}
+
+/// <summary>
+/// Parse a stripped XML-doc fragment (the concatenated `///` content
+/// with line-prefix removed) into the G1 canonical shape. Exported
+/// for direct testability without trivia-extraction.
+/// </summary>
+static Dictionary<string, object?>? ParseXmlDocFragment(string xml)
+{
+    // Wrap in a root element so XDocument can parse fragmented siblings.
+    string wrapped = "<__root__>" + xml + "</__root__>";
+    System.Xml.Linq.XDocument doc;
+    try
+    {
+        doc = System.Xml.Linq.XDocument.Parse(wrapped, System.Xml.Linq.LoadOptions.PreserveWhitespace);
+    }
+    catch
+    {
+        // Malformed XML — fall back to summary-only with the raw text.
+        return new Dictionary<string, object?> { ["summary"] = xml.Trim() };
+    }
+    var root = doc.Root!;
+
+    string? summary = null;
+    var summaryEl = root.Element("summary");
+    if (summaryEl != null) summary = NormalizeXmlInnerText(summaryEl.Value);
+
+    var paramsDict = new Dictionary<string, object?>();
+    foreach (var p in root.Elements("param"))
+    {
+        var name = (string?)p.Attribute("name");
+        if (!string.IsNullOrEmpty(name))
+        {
+            paramsDict[name!] = NormalizeXmlInnerText(p.Value);
+        }
+    }
+
+    string? returns = null;
+    var returnsEl = root.Element("returns");
+    if (returnsEl != null) returns = NormalizeXmlInnerText(returnsEl.Value);
+
+    var throwsList = new List<object?>();
+    foreach (var ex in root.Elements("exception"))
+    {
+        var cref = (string?)ex.Attribute("cref") ?? "";
+        // `cref="T:Namespace.Type"` → bare-name "Type"
+        var typeBare = cref;
+        var colonIdx = typeBare.IndexOf(':');
+        if (colonIdx >= 0) typeBare = typeBare.Substring(colonIdx + 1);
+        var dotIdx = typeBare.LastIndexOf('.');
+        if (dotIdx >= 0) typeBare = typeBare.Substring(dotIdx + 1);
+        throwsList.Add(new Dictionary<string, object?>
+        {
+            ["type"] = typeBare,
+            ["description"] = NormalizeXmlInnerText(ex.Value),
+        });
+    }
+
+    var examplesList = new List<object?>();
+    foreach (var ex in root.Elements("example"))
+    {
+        var t = NormalizeXmlInnerText(ex.Value);
+        if (t.Length > 0) examplesList.Add(t);
+    }
+
+    if (summary == null && paramsDict.Count == 0 && returns == null
+        && throwsList.Count == 0 && examplesList.Count == 0)
+    {
+        return null;
+    }
+
+    var result = new Dictionary<string, object?>();
+    result["summary"] = summary ?? "";
+    if (paramsDict.Count > 0) result["params"] = paramsDict;
+    if (returns != null) result["returns"] = returns;
+    if (throwsList.Count > 0) result["throws"] = throwsList;
+    if (examplesList.Count > 0) result["examples"] = examplesList;
+    return result;
+}
+
+static string NormalizeXmlInnerText(string raw)
+{
+    // Collapse runs of whitespace + trim. XML-doc tags often span
+    // multiple lines and consumers want a flat readable description.
+    var collapsed = System.Text.RegularExpressions.Regex.Replace(raw, @"\s+", " ");
+    return collapsed.Trim();
+}
 
 // --- Naming + canonicalization ----------------------------------------
 

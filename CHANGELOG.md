@@ -2,6 +2,21 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.17.0] — 2026-05-16
+
+Additive — Group G canonical documentation extraction. Closes part of Fathom row 4.6.1. .NET analyzer now passes 25/25 conformance fixtures at `full` — the top of the level ladder.
+
+### Added
+
+- `ExtractCanonicalDocumentation(node)` C# helper — pulls the contiguous `///` doc-comment lines from the leading trivia, strips `///` prefixes, wraps in a root element, parses via `XDocument.Parse`, and extracts the G1 canonical tag content.
+- `ParseXmlDocFragment(xml)` exported (callable) for direct testability without trivia extraction.
+- Tag mapping: `<summary>` → summary; `<param name="X">` → params[X]; `<returns>` → returns; `<exception cref="T:Type">` → throws[] (cref normalized to bare-name); `<example>` → examples[].
+- Malformed XML falls back to summary-only with the raw text — defensive against partial doc comments.
+
+### Element emission
+
+`documentation` (when extracted) + `documentationCoverage` (true/false) emitted on every element. Whitespace runs in tag content are collapsed to single spaces — XML-doc tags often span multiple lines and the canonical shape wants flat readable strings.
+
 ## [0.16.0] — 2026-05-16
 
 Additive — Group F type-system facets. Closes part of Fathom row 4.5.1. .NET analyzer now passes 24/24 conformance fixtures at `l6-ready`.
