@@ -2,6 +2,129 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.22.0] — 2026-05-24
+
+MSBuildWorkspace integration. Phase 2 of Fathom row `dotnet-csproj-sln-handling` (1.11.15) — closes the row and (by downstream measurement) the csharp side of `analyzer-cross-language-asymmetry` (5.0.50).
+
+### Added
+
+- `Program.MSBuildIntegration.cs` — new helper. `LoadProjects(csprojPaths, problems)` opens each discovered `.csproj` via `MSBuildWorkspace`, lets the workspace auto-resolve transitive `ProjectReference` siblings, then returns a per-document map (`absolute path → (Compilation, SyntaxTree)`). Compilation is shared per-project across documents; SyntaxTree is per-document.
+- `MSBuildLocator.RegisterDefaults` fires at process start in `Program.cs` before any MSBuild type JITs. Failures (no .NET SDK on host) degrade to a stderr note + the existing System-runtime-only `sharedCompilation` fallback.
+- `Microsoft.CodeAnalysis.CSharp.Workspaces@5.3.0` added to both `src` and `tests` csprojs. `Microsoft.CodeAnalysis.Workspaces.MSBuild` on its own doesn't pull in C# language handlers; `MSBuildWorkspace.OpenProjectAsync` throws `Cannot open project ... because the language 'C#' is not supported` without it.
+
+### Changed
+
+- `BuildArtifact` / `DecomposeWithRoslyn` parameter type relaxed from `CSharpCompilation` → `Compilation` (base type) so the workspace-produced `Compilation` is accepted without a cast. Behavior unchanged; only `Compilation.GetSemanticModel` is used.
+- `RunOutput` now branches per-file: if the file path is in the MSBuild project map, the project's `Compilation`+document tree is used (NuGet PackageReferences + ProjectReferences resolved). Otherwise the existing single-`sharedCompilation` path runs — orphan `.cs` files outside any `.csproj` directory still produce artifacts unchanged.
+- Per-project load failures emit `{type: "problem", problem: ...}` lines and fall through; one broken `.csproj` does not abort the analyzer.
+
+### Why
+
+Pre-Phase-2 `DecomposeWithRoslyn` built a single Compilation with only `typeof(object).Assembly.Location` as a reference. Every PackageReference + ProjectReference symbol was unresolvable, which collapsed downstream Fathom layers for .NET workspaces: csharp `entry_point_distribution` 91% `none`, csharp L5 scenarios `stepCount` 0 across 100% sampled, 0 csharp entities at L7b (per row 5.0.50). Phase 1 already shipped `.csproj`/`.sln` discovery + structural artifacts and pre-positioned `Microsoft.CodeAnalysis.Workspaces.MSBuild@5.3.0` + `Microsoft.Build.Locator@1.7.8`; Phase 2 wires them through.
+
+### Tests
+
+96/96 pass (91 prior + 5 new in `tests/MSBuildIntegrationTests.cs`). New tests pin every shape in the failure-class catalog per Rule 8: (1) positive load on the restored fixture; (2) malformed `.csproj` emits a problem and the load map stays empty; (3) cross-project resolution — `Worker.Run` → `Helper.DoThing` symbol carries `DeclaringSyntaxReferences` pointing at the absolute path of `Lib/Helper.cs`; (4) cross-package resolution — `JsonConvert.SerializeObject` resolves to a metadata-only symbol with empty `DeclaringSyntaxReferences` (pins the "external → no edge" invariant `Program.cs`'s `ResolveCallTarget` depends on); (5) orphan fallback — `Orphan.cs` outside any `.csproj` is absent from the loaded map. RED-confirmed pre-fix: 5/5 failed.
+
+Fixture: new `fathom/fathom-test-fixtures/dotnet-msbuild/` with `Lib/Lib.csproj` (net9.0 class library, one class `Helper.DoThing()`) + `App/App.csproj` (net9.0 console app, `<PackageReference>` Newtonsoft.Json@13.0.3, `<ProjectReference>` to Lib, `App/Worker.cs` invokes both cross-boundary methods) + `Orphan.cs` (no `.csproj`). `setup.sh` runs `dotnet restore App/App.csproj`; `bin/`/`obj/` gitignored. Restore is required before tests 1/3/4 (tests fail-loudly if `obj/project.assets.json` is absent rather than silently skipping).
+
+End-to-end smoke against the fixture (built `dist/NodegraphAnalyzerDotnet.dll`): `MSBuildWorkspace loaded 9 document(s) from 2 project(s); 0 problem(s)`; `Worker.Run` emits `calls` edge to `helper/dothing` with `targetRef = :Users:...:Lib:Helper.cs#helper:dothing` (full cross-project resolution); `Orphan.cs` artifact emits via sharedCompilation fallback; no edge to external `JsonConvert.SerializeObject` (existing external-classifier behavior preserved).
+
+### Risk envelope
+
+- Hosts without .NET SDK: `MSBuildLocator.RegisterDefaults()` throws → caught → stderr note → all .cs files go through the System-runtime-only `sharedCompilation` (pre-Phase-2 behavior).
+- Broken `.csproj`: per-project try/catch logs a problem and continues; sibling projects load.
+- `.cs` files outside any loaded project's directory: not in the project map → `sharedCompilation` path. No regression vs Phase 1.
+- Performance: MSBuildWorkspace load adds a one-time per-project cost. Smoke run on the fixture took ~1.2s end-to-end (2 projects, 9 documents). Per-large-workspace characterization will surface in the live PNE measurement; if it's >2× the prior path, a follow-on row will be filed (not blocking).
+
+### Closes
+
+- **Row 1.11.15 `dotnet-csproj-sln-handling` Phase 2.** Phase 1 shipped 2026-05-10 (0.9.0); Phase 2 ships here. Row moves Active → Done.
+- **Row 5.0.50 `analyzer-cross-language-asymmetry` (csharp portion).** Closed by downstream re-measurement of the integration against a real .NET workspace — see workspace `.agents/planning/changelog.md` for the operator-facing pre/post numbers. Swift portion stays Parked under the Swift park.
+
+## [0.21.0] — 2026-05-24
+
+Cross-platform Node shim replaces bash shim. Closes Fathom row `analyzers-windows-cmd-shim` (0.2.1) on the .NET side.
+
+### Changed
+
+- `bin/nodegraph-analyzer-dotnet.js` replaces `bin/nodegraph-analyzer-dotnet`. The new entry is a Node script (`#!/usr/bin/env node`) that spawns `dotnet <dll>` with the user's args. npm's standard bin-launcher generation produces a Unix symlink and Windows `.cmd` / `.ps1` wrappers automatically — no per-platform shim files needed and no bash dependency.
+- `package.json` `bin` field updated to point at the new `.js`.
+- README prerequisites updated: `bash` removed; Node is sufficient (along with the .NET 9 runtime).
+
+### Removed
+
+- The bash-only `bin/nodegraph-analyzer-dotnet` shim. No backwards compatibility shim — consumers go through npm's resolved `node_modules/.bin/nodegraph-analyzer-dotnet`, which now points at the JS file.
+
+### Why
+
+Pre-fix Windows users without WSL had no working binary path: npm-generated `.cmd` wrappers around a bash shim require bash on PATH. The architectural fix is to make the bin entry a Node script (the standard npm cross-platform pattern), not to add a sibling `.cmd` file. Same approach the workspace's TS analyzers and CLI tools already use; the .NET analyzer was the outlier.
+
+### Tests
+
+Smoke-tested: `bin/nodegraph-analyzer-dotnet.js --help` invokes the .NET binary and reaches the args validator (exits with the analyzer's own "required argument" error, confirming the spawn chain works). Existing 91 analyzer tests still pass (only the bin entrypoint changed; analyzer logic untouched).
+
+## [0.20.0] — 2026-05-24
+
+Canonical-name underscore preservation. Closes Fathom row `dotnet-canonical-name-underscore-collision` (5.2.1).
+
+### Fixed
+
+- `Canonicalize` (per-segment name canonicalization) now preserves `_` in identifiers. Pre-fix the rule treated underscore as a separator (anything not `[a-z0-9]` got collapsed to a dash; leading dashes were trimmed), so `_field` and `Field` both reduced to `field` and collided on the canonical natural-key path. Real-world impact: PNP/Utilities reported 13 element-name collisions (`api/_environment` vs `api/Environment` and similar); PNE/HealthGorilla had 1.
+
+### Refactor
+
+- Hoisted `Canonicalize` into a new `NamingHelpers` static class in `src/Program.Naming.cs` so the rule is unit-testable from the test project. The top-level `Canonicalize` in `Program.cs` is now a one-line forwarder.
+
+### Tests
+
+91/91 tests pass (79 prior + 12 new `NamingTests.cs`). New tests pin: underscore preservation (`_field` ≠ `Field`, leading / trailing / dunder); baseline behavior (PascalCase lowercasing, dot-separator collapse, paren / comma collapse, digit preservation, trailing-punctuation trim, repeat-punctuation single-dash).
+
+### Breaking
+
+Pre-prod per `feedback_pre_prod_no_migration`: any existing `.fathom/graph.db` with `_*`-named C# elements has different canonical names post-update. Delete + rebuild is the operator's accepted migration. The breakage surface is small in practice (only C# codebases with leading-underscore field naming where the underscore-stripped name collides with another sibling element — typically rare outside the specific naming-convention collisions this row was filed against).
+
+## [0.19.0] — 2026-05-24
+
+Shadow-aware intra-class edge extraction. Closes Fathom row `analyzers-intraclass-shadow` (2.2.4) on the .NET side.
+
+### Fixed
+
+- `IntraClassHelpers.ExtractEdges` now suppresses Cases 2 + 3 (bare-identifier invocation matching a method name; bare identifier matching a field/property name) when the name is shadowed by a locally-introduced binding in the method body — parameters, local variable declarations, foreach iteration variables, catch variables, and pattern-variable designations. Previously, a parameter or local named the same as a class member fired a spurious `accessesField` / `callsMethod` edge into the cohesion graph (LCOM4 over-reported cohesion).
+- `this.X` / `base.X` (Case 1) remains unambiguous and continues to fire regardless of local bindings.
+
+### Why
+
+2026-05-24 promotion of trade-off 2.2.4 under the tighten-from-the-bottom principle — L0 wire-protocol precision affects L2/L3 cohesion-driven derivations. C# convention frequently omits `this.` for member access, so Cases 2 + 3 carry the dominant signal, making shadowing the dominant precision risk. The TS analyzer addressed the same risk earlier by silencing its bare-identifier branch entirely (TS `this.` discipline is stronger); .NET retains the bare-identifier branch and gains a scope tracker instead.
+
+### Tests
+
+79/79 tests pass (68 prior + 11 new in `tests/IntraClassTests.cs`). New tests cover every shadowing pattern category per the test-fixture-pattern-catalog standard: parameter, local, foreach iteration variable, catch variable, and pattern designation, each tested against both `accessesField` and `callsMethod` where applicable. Positive baselines (no-shadow `this.X` and bare reference both fire) and a negative (`this.X` still fires even when a parameter shadows) are also pinned. RED-confirmed pre-fix: 8/11 failed.
+
+### Trade-off
+
+Conservative — doesn't model block scopes precisely. A class member whose name collides with an unrelated local in any branch of the method body is dropped entirely from the cohesion graph for that method. Under-counting is the chosen bias for LCOM4 (false-positives previously over-reported cohesion). Scope-precise tracking would tighten further but adds complexity without a felt consumer need today.
+
+## [0.18.0] — 2026-05-23
+
+`overrides` edge emission. P4a of Fathom row `l2-overrides-edge-first-class` (3.1.2.1). Cross-language parity with `@kepello/nodegraph-analyzer-typescript@0.36.0`.
+
+### Added
+
+- .NET analyzer emits `overrides` edges for class methods that override a parent's method. Two emission paths handled via Roslyn's semantic model:
+  - **Class override**: `IMethodSymbol.OverriddenMethod` (non-null when the `override` keyword is used on a virtual/abstract base method).
+  - **Interface implementation**: `containingType.AllInterfaces` × `FindImplementationForInterfaceMember` — handles both implicit (name-match) and explicit (`void IFoo.Bar()`) interface implementations.
+- Edge direction: source = OVERRIDING method (this class's member); target = OVERRIDDEN method (parent class or interface member). Matches the substrate's existing child→parent convention.
+- Cross-file `targetRef` resolution via `DeclaringSyntaxReferences[0].SyntaxTree.FilePath`.
+
+### Why
+
+Continuation of the architectural ship started in `nodegraph-analysis@2.29.0` (P1 protocol), `nodegraph-analyzer-typescript@0.36.0` (P2 TS emission), and `nodegraph-capability-units@0.8.0` + `fathom-cli@4.23.0` (P3 L2 closure walker). P4a brings .NET to parity — every C# overlay/repository/service impl now contributes `overrides` edges, closing the L2 visibility gap on .NET workspaces (analogous to the +5.78pp TS Gate 3 movement observed today on Fathom workspace).
+
+### Tests
+
+68/68 .NET tests pass. New emission code does not affect existing test fixtures (they don't exercise heritage). Cross-language behavior verified against the same conformance fixtures the TS analyzer uses; live impact on .NET workspaces (PNE / PNP) measured at next operator-driven analyze run.
+
 ## [0.17.0] — 2026-05-16
 
 Additive — Group G canonical documentation extraction. Closes part of Fathom row 4.6.1. .NET analyzer now passes 25/25 conformance fixtures at `full` — the top of the level ladder.

@@ -4,8 +4,8 @@
 
 ## Prerequisites
 
-- The **.NET 9 SDK or runtime** must be installed and on your `PATH`. The package ships a managed binary (a `.dll`) plus a small bash shim that invokes `dotnet`.
-- Bash (or compatible shell) on the host. Windows users running outside WSL will need a `.cmd` wrapper, currently TODO.
+- The **.NET 9 SDK or runtime** must be installed and on your `PATH`. The package ships a managed binary (a `.dll`) plus a Node shim that invokes `dotnet`.
+- Node.js (any version npm itself supports). The shim is a `node` script, so npm's standard bin-launcher generation gives cross-platform invocation — Unix symlink, Windows `.cmd` / `.ps1` wrappers — without depending on bash.
 
 ## Install
 

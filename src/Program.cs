@@ -20,6 +20,13 @@ using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 
+// MSBuildLocator.RegisterDefaults MUST fire before any MSBuild type is
+// JIT-touched. Failures (no .NET SDK on host) degrade gracefully:
+// per-csproj project loading is skipped, and the analyzer falls back to
+// the System-runtime-only sharedCompilation path that pre-Phase-2 code
+// shipped. Per Fathom row dotnet-csproj-sln-handling (1.11.15) Phase 2.
+var msbuildAvailable = TryRegisterMsbuild();
+
 var cliArgs = ParseArgs(Environment.GetCommandLineArgs().Skip(1).ToArray());
 
 if (string.IsNullOrEmpty(cliArgs.Path))
@@ -39,9 +46,23 @@ if (cliArgs.Discover)
     return;
 }
 
-RunOutput(cliArgs, loadedConfig);
+RunOutput(cliArgs, loadedConfig, msbuildAvailable);
 
-static void RunOutput(AnalyzerArgs args, AnalyzerConfig config)
+static bool TryRegisterMsbuild()
+{
+    try
+    {
+        Microsoft.Build.Locator.MSBuildLocator.RegisterDefaults();
+        return true;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($".NET analyzer: MSBuildLocator.RegisterDefaults failed ({ex.GetType().Name}: {ex.Message}); falling back to sharedCompilation path.");
+        return false;
+    }
+}
+
+static void RunOutput(AnalyzerArgs args, AnalyzerConfig config, bool msbuildAvailable)
 {
     Console.Error.WriteLine($".NET analyzer (output): scanning {args.Path}");
 
@@ -54,14 +75,36 @@ static void RunOutput(AnalyzerArgs args, AnalyzerConfig config)
     var startTime = DateTime.UtcNow;
     var elementsEmitted = 0;
 
+    // Phase 2 (row 1.11.15): per-project MSBuild compilation map.
+    // For each .cs that maps to a loaded project, the analyzer uses the
+    // project's Compilation — which has NuGet PackageReferences and
+    // cross-project ProjectReferences resolved by the MSBuildWorkspace.
+    // The sharedCompilation below remains the fallback for orphan files
+    // (.cs outside any csproj directory, hosts without .NET SDK, or
+    // .csproj that failed to load).
+    Dictionary<string, (Compilation Compilation, SyntaxTree SyntaxTree)> projectMap =
+        new(StringComparer.Ordinal);
+    var projectProblems = new List<object>();
+    if (msbuildAvailable && csprojFiles.Count > 0)
+    {
+        projectMap = MSBuildIntegration.LoadProjects(csprojFiles, projectProblems);
+        Console.Error.WriteLine($".NET analyzer: MSBuildWorkspace loaded {projectMap.Count} document(s) from {csprojFiles.Count} project(s); {projectProblems.Count} problem(s).");
+    }
+    foreach (var p in projectProblems)
+    {
+        Emit(new { type = "problem", problem = p });
+    }
+
     // Per language-conformance row 4.1.2 Stage 3b (2026-05-16) — project-
     // level analysis pivot. Build ONE Compilation containing every .cs
     // file in the source dir so the SemanticModel resolves cross-file
     // references natively. Cross-file edges (calls, references, etc.)
     // emit `targetRef` with the resolved target's file natural key.
     //
-    // Per operator preference (notes.md 2026-05-16 project-level pivot):
-    // no per-file fallback. The Compilation is the analyzer's runtime.
+    // This sharedCompilation is the FALLBACK for files not under any
+    // loaded csproj — orphan .cs in the source tree, hosts without
+    // MSBuild, or projects that failed to open. Cross-package /
+    // cross-project resolution there only fires via the project map.
     var fileContents = new Dictionary<string, string>();
     var syntaxTrees = new List<SyntaxTree>();
     foreach (var filePath in csFiles)
@@ -82,16 +125,28 @@ static void RunOutput(AnalyzerArgs args, AnalyzerConfig config)
         syntaxTrees: syntaxTrees,
         references: [MetadataReference.CreateFromFile(typeof(object).Assembly.Location)]);
 
-    // Per-file iteration. Reuses the shared Compilation so SemanticModel
-    // queries during edge emission have cross-file context. Parallel
-    // ordering preserved; Console.WriteLine is atomic per call in .NET.
+    // Per-file iteration. Project-map hit uses the MSBuildWorkspace
+    // compilation; orphan files use the sharedCompilation fallback.
+    // Parallel ordering preserved; Console.WriteLine is atomic per call in .NET.
     Parallel.ForEach(syntaxTrees, tree =>
     {
         var filePath = tree.FilePath;
         try
         {
             if (!fileContents.TryGetValue(filePath, out var content)) return;
-            var artifact = BuildArtifact(content, filePath, config.IncludeComments, sharedCompilation, tree);
+            Compilation compilationForFile;
+            SyntaxTree treeForFile;
+            if (projectMap.TryGetValue(filePath, out var projectEntry))
+            {
+                compilationForFile = projectEntry.Compilation;
+                treeForFile = projectEntry.SyntaxTree;
+            }
+            else
+            {
+                compilationForFile = sharedCompilation;
+                treeForFile = tree;
+            }
+            var artifact = BuildArtifact(content, filePath, config.IncludeComments, compilationForFile, treeForFile);
             if (artifact == null) return;
             Emit(new { type = "artifact", artifact });
             Interlocked.Increment(ref elementsEmitted);
@@ -151,7 +206,7 @@ static object? BuildArtifact(
     string content,
     string filePath,
     bool includeComments,
-    CSharpCompilation sharedCompilation,
+    Compilation sharedCompilation,
     SyntaxTree sharedTree)
 {
     var (elements, artifactEdges, problems, limitations) = DecomposeWithRoslyn(
@@ -220,7 +275,7 @@ static string? ExtractFileLeadingComment(string content)
 
 static (object[] elements, object[] artifactEdges, object[] problems, object[] limitations) DecomposeWithRoslyn(
     string content, string filePath, bool includeComments,
-    CSharpCompilation sharedCompilation, SyntaxTree tree)
+    Compilation sharedCompilation, SyntaxTree tree)
 {
     var root = tree.GetRoot();
 
@@ -1249,14 +1304,91 @@ static object[] ExtractRelationships(
 
     if (node is TypeDeclarationSyntax overrideContainer)
     {
+        // Fathom row `l2-overrides-edge-first-class` (3.1.2.1 P4a): emit
+        // `overrides` edges for class methods that override a parent's
+        // method — either via `override` keyword (class extension /
+        // abstract override) OR implicit/explicit interface implementation.
+        // Direction: source = OVERRIDING method (this class's member);
+        // target = OVERRIDDEN method (parent class or interface member).
+        // Same convention as TS analyzer (nodegraph-analyzer-typescript@0.36.0).
+        var seenOverrides = new HashSet<string>();
         foreach (var member in overrideContainer.Members.OfType<MethodDeclarationSyntax>())
         {
-            if (member.Modifiers.Any(m => m.IsKind(SyntaxKind.OverrideKeyword)))
+            var memberSymbol = semanticModel.GetDeclaredSymbol(member) as IMethodSymbol;
+            if (memberSymbol == null) continue;
+
+            // Collect the set of parent methods this member overrides.
+            var parents = new List<IMethodSymbol>();
+
+            // 1. Class override (explicit `override` keyword on virtual/abstract).
+            if (memberSymbol.OverriddenMethod != null)
             {
-                // Override semantics live on the method element's isOverride
-                // facet per F2; no edge emitted. The legacy
-                // `inherits[overrides]` edge is dropped per Stage 3a.
-                _ = member;
+                parents.Add(memberSymbol.OverriddenMethod);
+            }
+
+            // 2. Interface implementations (implicit + explicit).
+            var containingType = memberSymbol.ContainingType;
+            if (containingType != null)
+            {
+                foreach (var iface in containingType.AllInterfaces)
+                {
+                    foreach (var ifaceMethod in iface.GetMembers().OfType<IMethodSymbol>())
+                    {
+                        var impl = containingType.FindImplementationForInterfaceMember(ifaceMethod);
+                        if (impl != null && SymbolEqualityComparer.Default.Equals(impl, memberSymbol))
+                        {
+                            parents.Add(ifaceMethod);
+                        }
+                    }
+                }
+            }
+
+            foreach (var parent in parents)
+            {
+                if (parent.ContainingType == null) continue;
+                var parentTypeName = parent.ContainingType.Name;
+                var parentMethodName = parent.Name;
+                // Param-sig matching `GetParamSignature` convention: (type1,type2)
+                // with spaces stripped + `/` → `-`. Use ToDisplayString for the
+                // Roslyn IParameterSymbol.Type — gives a canonical representation
+                // the substrate's tail-match can bridge to declaration-side keys.
+                string parentParamSig;
+                if (parent.Parameters.Length == 0)
+                {
+                    parentParamSig = "()";
+                }
+                else
+                {
+                    parentParamSig = "(" + string.Join(",", parent.Parameters.Select(p =>
+                        p.Type.ToDisplayString().Replace("/", "-").Replace(" ", ""))) + ")";
+                }
+                var parentQualified = $"{parentTypeName}/{parentMethodName}{parentParamSig}";
+                var canonical = CanonicalizePath(parentQualified);
+                if (string.IsNullOrEmpty(canonical)) continue;
+                if (!seenOverrides.Add(canonical)) continue;
+
+                // Resolve parent's declaring file for cross-file targetRef.
+                var parentTargetFile = parent.DeclaringSyntaxReferences
+                    .Select(r => r.SyntaxTree.FilePath)
+                    .FirstOrDefault();
+                if (parentTargetFile == currentFilePath) parentTargetFile = null;
+                if (parentTargetFile != null && parentTargetFile.Contains("/node_modules/", StringComparison.Ordinal))
+                {
+                    // Don't emit overrides for external (npm-style; rare in .NET
+                    // but defensive). Strict-emit budget consistent with TS analyzer.
+                    parentTargetFile = null;
+                    continue;
+                }
+
+                if (parentTargetFile != null)
+                {
+                    var targetRef = MakeNaturalKey(parentTargetFile, canonical);
+                    relationships.Add(new { type = "overrides", targetName = canonical, targetRef });
+                }
+                else
+                {
+                    relationships.Add(new { type = "overrides", targetName = canonical });
+                }
             }
         }
     }
@@ -1557,29 +1689,7 @@ static string BareNameFrom(string rawName)
     return parenIdx < 0 ? tail : tail.Substring(0, parenIdx);
 }
 
-static string Canonicalize(string raw)
-{
-    if (string.IsNullOrEmpty(raw)) return string.Empty;
-    var lower = raw.ToLowerInvariant();
-    var sb = new StringBuilder();
-    var lastDash = true;
-    foreach (var c in lower)
-    {
-        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))
-        {
-            sb.Append(c);
-            lastDash = false;
-        }
-        else if (!lastDash)
-        {
-            sb.Append('-');
-            lastDash = true;
-        }
-    }
-    var result = sb.ToString();
-    if (result.EndsWith('-')) result = result.Substring(0, result.Length - 1);
-    return result;
-}
+static string Canonicalize(string raw) => NamingHelpers.Canonicalize(raw);
 
 static void Emit(object obj)
 {

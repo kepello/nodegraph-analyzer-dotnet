@@ -29,14 +29,15 @@
 ///   3. IdentifierName references inside the body that match a
 ///      field/property name — bare references to instance state.
 ///
-/// Cases 2 and 3 can over-count when a parameter or local variable
-/// shadows a class member's name. Walking the enclosing scope to
-/// detect shadowing would tighten precision; v1 accepts the small
-/// over-count because false-positives in the cohesion graph
-/// over-report cohesion (LCOM4 lower) while false-negatives
-/// under-report it. Over-reporting is the safer bias for slice 6's
-/// derivation; LCOM4 precision can be tightened with semantic
-/// analysis when a real consumer hits the wall.
+/// Cases 2 and 3 suppress when the bare identifier name is shadowed
+/// by a locally-introduced binding (parameter, local variable,
+/// foreach iteration variable, catch variable, or pattern
+/// designation) anywhere in the method body. This is conservative:
+/// it doesn't model block scopes precisely, so a class member whose
+/// name collides with an unrelated local in any branch is dropped
+/// from the cohesion graph. Under-counting is the chosen bias for
+/// LCOM4 (false-positives previously over-reported cohesion); the
+/// `this.X` form is unambiguous and continues to fire under Case 1.
 /// </summary>
 
 using Microsoft.CodeAnalysis;
@@ -118,6 +119,7 @@ static class IntraClassHelpers
         // `readwrite` based on the surrounding syntactic context.
         var fieldAccess = new Dictionary<string, (bool Read, bool Write)>();
         var calledMethods = new HashSet<string>();
+        var shadowedNames = CollectShadowedNames(body);
 
         void RecordFieldAccess(string name, string kind)
         {
@@ -155,10 +157,13 @@ static class IntraClassHelpers
 
             // Case 2: bare-identifier invocation whose callee matches
             // a method on the containing type. `Reset()` in a method
-            // body is the implicit `this.Reset()`.
+            // body is the implicit `this.Reset()`. Suppress when the
+            // name is shadowed locally (see analyzers-intraclass-shadow
+            // 2.2.4).
             if (node is InvocationExpressionSyntax invocation
                 && invocation.Expression is IdentifierNameSyntax callee
-                && members.Methods.Contains(callee.Identifier.Text))
+                && members.Methods.Contains(callee.Identifier.Text)
+                && !shadowedNames.Contains(callee.Identifier.Text))
             {
                 calledMethods.Add(callee.Identifier.Text);
                 continue;
@@ -176,6 +181,10 @@ static class IntraClassHelpers
                 {
                     continue;
                 }
+                // Suppress when a parameter / local / pattern-var /
+                // foreach-var / catch-var in this body shadows the
+                // class member (analyzers-intraclass-shadow 2.2.4).
+                if (shadowedNames.Contains(name)) continue;
                 if (IsDeclarationNameSlot(id)) continue;
                 // Skip the `Name` slot of a MemberAccessExpression —
                 // `obj.foo` should not double-count as a bare `foo`
@@ -243,6 +252,47 @@ static class IntraClassHelpers
         }
 
         return "read";
+    }
+
+    /// <summary>
+    /// Collect names introduced locally inside <paramref name="body"/>
+    /// that can shadow class members: method/lambda/local-function
+    /// parameters, local variable declarations, foreach iteration
+    /// variables, catch variables, and pattern variable
+    /// designations. Used by <see cref="ExtractEdges"/> to suppress
+    /// bare-identifier matches when a local binding of the same name
+    /// is present — see analyzers-intraclass-shadow (2.2.4).
+    ///
+    /// Conservative: doesn't model block scopes precisely. If a name
+    /// is introduced anywhere in the body, all bare-identifier
+    /// references to it are dropped. `this.X` / `base.X` remain
+    /// unambiguous and continue to fire under Case 1.
+    /// </summary>
+    private static HashSet<string> CollectShadowedNames(SyntaxNode body)
+    {
+        var names = new HashSet<string>();
+        foreach (var node in body.DescendantNodes())
+        {
+            switch (node)
+            {
+                case ParameterSyntax p:
+                    names.Add(p.Identifier.Text);
+                    break;
+                case VariableDeclaratorSyntax v:
+                    names.Add(v.Identifier.Text);
+                    break;
+                case ForEachStatementSyntax fe:
+                    names.Add(fe.Identifier.Text);
+                    break;
+                case CatchDeclarationSyntax cd when cd.Identifier.ValueText.Length > 0:
+                    names.Add(cd.Identifier.Text);
+                    break;
+                case SingleVariableDesignationSyntax svd:
+                    names.Add(svd.Identifier.Text);
+                    break;
+            }
+        }
+        return names;
     }
 
     /// <summary>
