@@ -217,7 +217,7 @@ static object? BuildArtifact(
         ["id"] = filePath,
         ["filePath"] = filePath,
         ["language"] = "csharp",
-        ["contentHash"] = ComputeHash(content),
+        ["sourceHash"] = ComputeHash(content),
         ["elements"] = elements,
     };
     if (artifactEdges.Length > 0) artifact["edges"] = DedupeEdges(artifactEdges).ToArray();
@@ -477,7 +477,7 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
             ["name"] = name,
             ["kind"] = elementKind,
             ["sourceLocation"] = sourceLocation,
-            ["contentHash"] = contentHash,
+            ["sourceHash"] = contentHash,
             ["observation"] = observation,
             ["edges"] = DedupeEdges(relationships).ToArray(),
             ["metadata"] = metadata,

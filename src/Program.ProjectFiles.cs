@@ -44,7 +44,7 @@ static class ProjectFileHelpers
                 ["id"] = filePath,
                 ["filePath"] = filePath,
                 ["language"] = "csproj",
-                ["contentHash"] = ComputeHash(content),
+                ["sourceHash"] = ComputeHash(content),
                 ["elements"] = Array.Empty<object>(),
                 ["problems"] = new[] { new { message = $"Failed to parse .csproj XML: {ex.Message}" } },
             };
@@ -126,7 +126,7 @@ static class ProjectFileHelpers
             // unchanged .csproj content produce identical hashes and
             // the element reports as `unchanged` instead of superseding
             // every run.
-            ["contentHash"] = ComputeHash(content),
+            ["sourceHash"] = ComputeHash(content),
         };
         if (elementMetadata.Count > 0) element["metadata"] = elementMetadata;
 
@@ -165,7 +165,7 @@ static class ProjectFileHelpers
             ["id"] = filePath,
             ["filePath"] = filePath,
             ["language"] = "csproj",
-            ["contentHash"] = ComputeHash(content),
+            ["sourceHash"] = ComputeHash(content),
             ["elements"] = new[] { element },
         };
         if (artifactEdges.Count > 0) artifact["edges"] = artifactEdges.ToArray();
@@ -211,7 +211,7 @@ static class ProjectFileHelpers
         {
             ["name"] = solutionName,
             ["kind"] = "solution",
-            ["contentHash"] = ComputeHash(content),
+            ["sourceHash"] = ComputeHash(content),
         };
         if (elementMetadata.Count > 0) element["metadata"] = elementMetadata;
 
@@ -231,7 +231,7 @@ static class ProjectFileHelpers
             ["id"] = filePath,
             ["filePath"] = filePath,
             ["language"] = "sln",
-            ["contentHash"] = ComputeHash(content),
+            ["sourceHash"] = ComputeHash(content),
             ["elements"] = new[] { element },
         };
         if (artifactEdges.Count > 0) artifact["edges"] = artifactEdges.ToArray();

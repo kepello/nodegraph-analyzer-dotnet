@@ -2,6 +2,10 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.23.0] — 2026-05-28
+
+Two-hash adoption (Fathom row 1.12.5): emit `sourceHash` (renamed from `contentHash`) on every artifact/element — it always held a source hash. The overlay composes the substrate `contentHash` from it, so an analyzer-rule change that doesn't touch source still re-tips. Peer dep on `@kepello/nodegraph-analysis` retargeted to `^3.0.0`.
+
 ## [0.22.0] — 2026-05-24
 
 MSBuildWorkspace integration. Phase 2 of Fathom row `dotnet-csproj-sln-handling` (1.11.15) — closes the row and (by downstream measurement) the csharp side of `analyzer-cross-language-asymmetry` (5.0.50).
