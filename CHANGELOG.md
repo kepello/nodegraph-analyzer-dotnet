@@ -2,6 +2,23 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.27.0] — 2026-06-01
+
+Two L0-.NET residual fixes (Fathom rows 5.0.68.3 + 5.0.68.2.1).
+
+### Fixed
+
+- **Case-only canonical-name collisions no longer drop elements (5.0.68.3).** C# allows case-distinct siblings (`isAuto` vs `IsAuto`); both lowercase to the same canonical key. The walk previously emitted a hard error and DROPPED the second declaration. Now both are emitted (the second disambiguated with a `-casedup{n}` suffix) and a structured `csharp-canonical-name-collision` limitation is recorded. Edge resolution is case-insensitive by design, so edges to the bare name resolve to the first declaration — a documented residual, not a dropped element. On Utilities: 3 hard errors → 0; +3 elements kept.
+- **Contains edges now reuse the authoritative canonical map (5.0.68.3 root cause).** The element walk and the type→member `contains` pass were two independent computations of the member canonical name; the contains pass recomputed from the raw name and missed the disambiguation suffixes (the `$count` overload-signature counter AND the new `-casedup`), so contains edges mis-targeted on signature/case collisions — which mis-feeds L3 cluster membership. Restructured into a **two-pass** design: pass 1 assigns every node its final collision-resolved canonical into one map; pass 2 emits elements + contains edges reading that map. One source of truth.
+
+### Added
+
+- **`library-export-method` extended to public-property accessors (5.0.68.2.1).** Get/set accessors of a public property on a library-export type are externally callable (`new T().Prop` / `.Prop = v`), so they now classify as method-level entry points (TS parity, 5.3.4.3.3). Required fixing `DeriveAccessibility` to inherit the enclosing property's accessibility for accessors without an explicit modifier (they defaulted to `private`, hiding public accessors). On Utilities: `library-export-method` 137 → 221.
+
+### Tests
+
+- 3 new integration tests (case-collision keeps-both + limitation; public-property accessors → library-export-method; private-property accessors → none). 110 tests pass. Resolution unchanged at 100% across the corpora.
+
 ## [0.26.1] — 2026-06-01
 
 Indexer accessor-call fix surfaced by the EnvisionWeb corpus validation (Fathom row `dotnet-l0-emission-completeness-probe` 5.0.68.4).

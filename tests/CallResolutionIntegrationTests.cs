@@ -145,6 +145,54 @@ public class CallResolutionIntegrationTests
     }
 
     [Fact]
+    public void EntryPoint_PublicPropertyAccessors_AreLibraryExportMethod()
+    {
+        // Get/set accessors of a PUBLIC property on a library-export type are
+        // externally callable (`new T().Prop` / `.Prop = v`) → library-export-
+        // method, same as a public method (Fathom 5.0.68.2.1; TS parity 5.3.4.3.3).
+        // Accessors of a private property stay `none` (inherit private — the
+        // DeriveAccessibility fix; pre-fix they defaulted to private regardless).
+        var dir = MakeTempTree(("Box.cs", @"
+public class Box {
+    public int Value { get; set; }
+    private int Hidden { get; set; }
+}"));
+        try
+        {
+            var ep = AnalyzeEntryPoints(dir, "Box.cs");
+            Assert.Equal("library-export-method", ep.GetValueOrDefault("box/value/get"));
+            Assert.Equal("library-export-method", ep.GetValueOrDefault("box/value/set"));
+            Assert.Equal("none", ep.GetValueOrDefault("box/hidden/get"));
+            Assert.Equal("none", ep.GetValueOrDefault("box/hidden/set"));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void CaseOnlyNameCollision_KeepsBothElements_EmitsLimitationNotError()
+    {
+        // C# allows case-distinct siblings (`isAuto` vs `IsAuto`); both lowercase
+        // to the same canonical key. Pre-fix the analyzer emitted a hard error
+        // and DROPPED the second (lossy, Fathom 5.0.68.3). Now: both elements
+        // emitted (second disambiguated `-casedup1`) + a structured limitation,
+        // no dropped element.
+        var dir = MakeTempTree(("Cam.cs", @"
+public class CameraPropertyValue {
+    public bool isAuto;
+    public bool IsAuto { get; set; }
+}"));
+        try
+        {
+            var ep = AnalyzeEntryPoints(dir, "Cam.cs");
+            Assert.True(ep.ContainsKey("camerapropertyvalue/isauto"), "first declaration kept");
+            Assert.True(ep.ContainsKey("camerapropertyvalue/isauto-casedup1"), "second declaration kept (disambiguated), not dropped");
+            var (_, limitations) = AnalyzeFile(dir, "Cam.cs");
+            Assert.Contains("csharp-canonical-name-collision", limitations);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
     public void EntryPoint_PublicMethodOnPublicType_IsLibraryExportMethod()
     {
         // L0-.NET Gate 3: a public method on a public top-level type is

@@ -341,39 +341,94 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
     // The collision-counter logic stays as a defensive fallback in case
     // two callables produce the same signature (unusual but possible
     // with generics / nested types).
-    var seenCanonical = new Dictionary<string, string>();
-    var qualifiedNameCounts = new Dictionary<string, int>();
+    // Pass 1 — assign every declarable node its FINAL canonical natural key
+    // (collision-resolved). Both the element emission AND the contains-edge pass
+    // below read this one authoritative map instead of recomputing the canonical
+    // from the raw member name. The recompute (pre-5.0.68.3) missed the
+    // disambiguation suffixes — the `$count` overload-signature counter AND the
+    // case-collision `-casedup` suffix — so contains edges mis-targeted the bare
+    // name (wrong sibling on case collisions; the first overload on sig
+    // collisions), which then mis-feeds L3 cluster membership. `DescendantNodes()`
+    // is pre-order (a type precedes its members), so the contains pass can't name
+    // a member during the type's own emission without this precomputed map.
+    var canonicalByNode = new Dictionary<SyntaxNode, (string Name, string QualifiedRaw)>();
+    {
+        var seenCanonical = new Dictionary<string, string>();
+        var qualifiedNameCounts = new Dictionary<string, int>();
+        foreach (var node in root.DescendantNodes())
+        {
+            var rawName = GetDeclarationName(node);
+            if (rawName == null) continue;
+            if (GetElementType(node) == null) continue;
 
+            var qualifiedRaw = GetQualifiedRawName(node, rawName) + NamingHelpers.GetParamSignature(node);
+            if (qualifiedNameCounts.TryGetValue(qualifiedRaw, out var count))
+            {
+                qualifiedNameCounts[qualifiedRaw] = count + 1;
+                qualifiedRaw = $"{qualifiedRaw}${count}";
+            }
+            else
+            {
+                qualifiedNameCounts[qualifiedRaw] = 1;
+            }
+            var name = CanonicalizePath(qualifiedRaw);
+            if (string.IsNullOrEmpty(name))
+            {
+                problems.Add(new { severity = "error", message = $"Declaration \"{qualifiedRaw}\" canonicalizes to empty string" });
+                continue;
+            }
+            if (seenCanonical.TryGetValue(name, out var existingRaw))
+            {
+                // The raw-name collision counter above is case-SENSITIVE, so a
+                // true signature duplicate never reaches here. A collision on the
+                // CANONICAL name therefore means two declarations differ only by
+                // case (or punctuation) — e.g. C#'s case-sensitive siblings
+                // `isAuto` vs `IsAuto` both lowercasing to `isauto`. Pre-fix this
+                // emitted a hard error and DROPPED the second declaration (lossy,
+                // Fathom 5.0.68.3). Instead: disambiguate the element key so BOTH
+                // elements are emitted, and record a structured limitation. Edge
+                // resolution is case-insensitive by design (canonical keys are
+                // lowercased), so edges to the bare name resolve to the first
+                // declaration — a documented residual, not a dropped element.
+                var n = 1;
+                string disambiguated;
+                do { disambiguated = $"{name}-casedup{n}"; n++; } while (seenCanonical.ContainsKey(disambiguated));
+                var collisionSpan = node.GetLocation().GetLineSpan();
+                limitationsAccumulator.Add(new Dictionary<string, object?>
+                {
+                    ["kind"] = "csharp-canonical-name-collision",
+                    ["severity"] = "minor",
+                    ["location"] = new Dictionary<string, object?>
+                    {
+                        ["file"] = filePath,
+                        ["startLine"] = collisionSpan.StartLinePosition.Line + 1,
+                        ["endLine"] = collisionSpan.EndLinePosition.Line + 1,
+                    },
+                    ["description"] = $"Declaration \"{qualifiedRaw}\" canonicalizes to \"{name}\", colliding with "
+                        + $"\"{existingRaw}\" (case-only-distinct C# siblings). Emitted as \"{disambiguated}\" so the "
+                        + "element is not dropped; edges to the case-insensitive canonical name resolve to the first declaration.",
+                    ["metadata"] = new Dictionary<string, object?>
+                    {
+                        ["canonicalName"] = name,
+                        ["existingRaw"] = existingRaw,
+                        ["collidingRaw"] = qualifiedRaw,
+                    },
+                });
+                name = disambiguated;
+            }
+            seenCanonical[name] = qualifiedRaw;
+            canonicalByNode[node] = (name, qualifiedRaw);
+        }
+    }
+
+    // Pass 2 — emit elements, reading the canonical map (one source of truth).
     foreach (var node in root.DescendantNodes())
     {
-        var rawName = GetDeclarationName(node);
-        if (rawName == null) continue;
-
-        var elementKind = GetElementType(node);
-        if (elementKind == null) continue;
-
-        var qualifiedRaw = GetQualifiedRawName(node, rawName) + NamingHelpers.GetParamSignature(node);
-        if (qualifiedNameCounts.TryGetValue(qualifiedRaw, out var count))
-        {
-            qualifiedNameCounts[qualifiedRaw] = count + 1;
-            qualifiedRaw = $"{qualifiedRaw}${count}";
-        }
-        else
-        {
-            qualifiedNameCounts[qualifiedRaw] = 1;
-        }
-        var name = CanonicalizePath(qualifiedRaw);
-        if (string.IsNullOrEmpty(name))
-        {
-            problems.Add(new { severity = "error", message = $"Declaration \"{qualifiedRaw}\" canonicalizes to empty string" });
-            continue;
-        }
-        if (seenCanonical.TryGetValue(name, out var existingRaw))
-        {
-            problems.Add(new { severity = "error", message = $"Duplicate canonical element name \"{name}\" — declarations \"{existingRaw}\" and \"{qualifiedRaw}\" collide. Rename one." });
-            continue;
-        }
-        seenCanonical[name] = qualifiedRaw;
+        if (!canonicalByNode.TryGetValue(node, out var canon)) continue;
+        var name = canon.Name;
+        var qualifiedRaw = canon.QualifiedRaw;
+        var rawName = GetDeclarationName(node)!;
+        var elementKind = GetElementType(node)!;
 
         // Parent name: the canonical path with the last segment stripped.
         // Top-level declarations have no parent — the artifact contains
@@ -387,22 +442,19 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
         var relationships = ExtractRelationships(node, allNames, semanticModel, filePath, limitationsAccumulator, canonicalizeFilePath);
 
         // Type declarations emit explicit contains edges to their direct
-        // members. Core treats these as authoritative for containment.
-        // Members get the same parameter-signature suffix the standalone
-        // pass appends, so the contains-edge target matches the canonical
-        // name the member resolves to when iterated independently.
+        // members. Core treats these as authoritative for containment. The
+        // target is the member's FINAL canonical from pass 1's map — so the
+        // contains edge matches exactly the key the member element is emitted
+        // under, including any `$count` / `-casedup` disambiguation (Fathom
+        // 5.0.68.3). Members with no canonical (no element emitted) get no edge.
         if (node is TypeDeclarationSyntax typeDecl)
         {
             var containsEdges = new List<object>(relationships);
             foreach (var member in typeDecl.Members)
             {
-                var memberRawName = GetDeclarationName(member);
-                if (memberRawName == null) continue;
-                var memberQualified = $"{qualifiedRaw}/{memberRawName}{NamingHelpers.GetParamSignature(member)}";
-                var memberCanonical = CanonicalizePath(memberQualified);
-                if (!string.IsNullOrEmpty(memberCanonical))
+                if (canonicalByNode.TryGetValue(member, out var memberCanon))
                 {
-                    containsEdges.Add(new { type = "contains", targetName = memberCanonical });
+                    containsEdges.Add(new { type = "contains", targetName = memberCanon.Name });
                 }
             }
             relationships = containsEdges.ToArray();
@@ -1820,7 +1872,12 @@ static (string Kind, Dictionary<string, object?>? Trigger, Dictionary<string, ob
     // constructors are `ConstructorDeclarationSyntax` (not `MethodDeclarationSyntax`)
     // so excluded — they're reachable via the type. Accessibility-gated:
     // private / protected / internal methods are not externally callable.
-    if (node is MethodDeclarationSyntax && accessibility == "public")
+    // Methods AND get/set accessors: a public accessor on a public property of
+    // a library-export type is externally callable via `new T().Prop` /
+    // `new T().Prop = v`, same as a method (Fathom 5.0.68.2.1; TS parity with
+    // 5.3.4.3.3). The accessor's `accessibility` now correctly inherits the
+    // property's (DeriveAccessibility fix), so the public gate works.
+    if ((node is MethodDeclarationSyntax || node is AccessorDeclarationSyntax) && accessibility == "public")
     {
         var containingType = node.Ancestors().OfType<TypeDeclarationSyntax>().FirstOrDefault();
         if (containingType != null
@@ -1893,12 +1950,48 @@ static string? DeriveAccessibility(SyntaxNode node, Dictionary<string, object?> 
     // Class-level type declarations (no containing type) default to internal.
     if (node is TypeDeclarationSyntax && containingType == null) return "internal";
     if (node is BaseTypeDeclarationSyntax && containingType == null) return "internal";
+    // An accessor with no explicit modifier inherits the enclosing property's
+    // accessibility — a `get`/`set` on a `public` property is public, not
+    // private (Fathom 5.0.68.2.1). Without this, accessor elements reported
+    // `private` on public properties, hiding them from library-export-method
+    // classification (and mis-stating the `access` facet).
+    if (node is AccessorDeclarationSyntax accessor
+        && accessor.Parent?.Parent is BasePropertyDeclarationSyntax prop)
+    {
+        var propAccess = UniformAccessFromModifiers(prop.Modifiers);
+        if (propAccess != null) return propAccess;
+        // Property with no access modifier → class-member default (private).
+    }
     // Class members default to private.
     if (containingType != null && (node is MemberDeclarationSyntax || node is AccessorDeclarationSyntax))
     {
         return "private";
     }
     return null;
+}
+
+/// <summary>
+/// Map a declaration's modifier list to the uniform accessibility enum
+/// (public / internal / protected / private), applying C#'s combined-modifier
+/// rules (`private protected` → private, `protected internal` → internal).
+/// Returns null when no access modifier is present (caller applies the
+/// context default). Mirrors the per-modifier mapping in
+/// <c>Program.Analysis.cs</c>.
+/// </summary>
+static string? UniformAccessFromModifiers(SyntaxTokenList modifiers)
+{
+    string? access = null;
+    foreach (var m in modifiers)
+    {
+        switch (m.Text)
+        {
+            case "public": access = "public"; break;
+            case "private": access = access == "protected" ? "private" : "private"; break;
+            case "protected": access = access == "internal" ? "internal" : "protected"; break;
+            case "internal": access = access == "protected" ? "internal" : "internal"; break;
+        }
+    }
+    return access;
 }
 
 /// <summary>
