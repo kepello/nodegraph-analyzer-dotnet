@@ -152,6 +152,58 @@ public class App {
     }
 
     [Fact]
+    public void PropertyAccess_EmitsAccessorCallEdges_GetAndSet()
+    {
+        // C# property access is a method call on the get/set accessor — must
+        // emit `calls`/property-get (read) + property-set (write) to the
+        // accessor elements, not just a generic reference (Gate 5 E2 closer;
+        // mirrors TS 5.0.66). Plain fields must NOT (they have no accessor).
+        var dir = MakeTempTree(("Box.cs", @"
+public class Box {
+    public int Value { get; set; }
+    public int Plain;
+    public void Use(Box other) {
+        var x = other.Value;   // read → get-accessor
+        other.Value = 5;       // write → set-accessor
+        var y = other.Plain;   // field read → NOT an accessor call
+    }
+}"));
+        try
+        {
+            var (edges, _) = AnalyzeFile(dir, "Box.cs");
+            Assert.Contains(edges, e => e.Type == "calls" && e.Subtype == "property-get" && e.Target == "box/value/get");
+            Assert.Contains(edges, e => e.Type == "calls" && e.Subtype == "property-set" && e.Target == "box/value/set");
+            // A plain field access emits no accessor-call edge.
+            Assert.DoesNotContain(edges, e => e.Type == "calls" && e.Target.StartsWith("box/plain"));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void IntraClassCall_NestedType_QualifiedWithFullPath()
+    {
+        // Intra-class callsMethod in a NESTED type must qualify with the full
+        // nested path (Outer/Inner/...) so it binds to the nested member's
+        // element key — the typed-DataSet (nested DataTable) pattern. Immediate-
+        // class-only qualification left these dangling (Gate 5 corpus sweep).
+        var dir = MakeTempTree(("Nested.cs", @"
+public class Outer {
+    public class Inner {
+        public void Helper(int a) { }
+        public void Run() { Helper(1); }
+    }
+}"));
+        try
+        {
+            var (edges, _) = AnalyzeFile(dir, "Nested.cs");
+            Assert.Contains(edges, e => e.Type == "callsMethod"
+                && e.Target == "outer/inner/helper-int");
+            Assert.DoesNotContain(edges, e => e.Type == "callsMethod" && e.Target == "inner/helper-int");
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
     public void Delegate_EventHandlerSubscription_ResolvesToSignaturedHandler()
     {
         var dir = MakeTempTree(("Wiring.cs", @"

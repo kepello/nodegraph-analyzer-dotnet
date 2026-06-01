@@ -434,8 +434,15 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
             if (containingType != null)
             {
                 var memberIndex = IntraClassHelpers.BuildIndex(containingType);
-                var className = containingType.Identifier.Text;
-                var canonicalClass = Canonicalize(className);
+                // Qualify with the FULL nested-type path (`MyDataSet/MyDataTable`),
+                // not just the immediate class name, so intra-class targets bind
+                // to the nested member's element key (`mydataset:mydatatable:...`).
+                // Generated typed-DataSet code (nested DataTable classes) is the
+                // common case (Fathom row dotnet-l0-property-accessor-edges /
+                // nested-class intra-class qualification). Per-segment Canonicalize
+                // joined by `/` (the resolver treats `/` as the path separator).
+                var classQualifiedRaw = GetQualifiedRawName(containingType, containingType.Identifier.Text);
+                var canonicalClass = string.Join("/", classQualifiedRaw.Split('/').Select(Canonicalize));
                 var rels = relationships.ToList();
                 var intraResult = IntraClassHelpers.ExtractEdges(node, memberIndex);
                 foreach (var (edgeType, subtype, target) in intraResult.Edges)
@@ -1284,6 +1291,51 @@ static object[] ExtractRelationships(
         }
     }
 
+    // Resolve a property / indexer access (`obj.Prop`, `obj[i]`) to the
+    // accessor element it invokes — get-accessor for a read, set-accessor for
+    // a write (LHS of assignment). C# property access IS a method call on the
+    // accessor (Fathom row dotnet-l0-property-accessor-edges, Gate 5 / 5.0.68.4;
+    // mirrors the TS analyzer's 5.0.66/5.0.67). Targets the accessor element
+    // `<class>/<prop>/get|set` when the property declares an explicit/auto
+    // accessor block (an emitted element), else the property/indexer element
+    // itself (expression-bodied `=> ...` properties have no accessor element).
+    // Plain fields and external/BCL properties (no declaration) → null (no edge).
+    (string FilePath, string QualifiedRawName)? ResolveAccessorTarget(SyntaxNode memberAccess, bool isWrite)
+    {
+        try
+        {
+            var symbolInfo = semanticModel.GetSymbolInfo(memberAccess);
+            var symbol = symbolInfo.Symbol ?? symbolInfo.CandidateSymbols.FirstOrDefault();
+            if (symbol is not IPropertySymbol prop) return null; // properties + indexers only (not fields)
+            var declRefs = prop.DeclaringSyntaxReferences;
+            if (declRefs.Length == 0) return null; // external / BCL → no edge
+            var declFilePath = canonicalizeFilePath(declRefs[0].SyntaxTree.FilePath);
+            if (string.IsNullOrEmpty(declFilePath)) return null;
+            var declNode = declRefs[0].GetSyntax();
+            var declName = GetDeclarationName(declNode);
+            if (declName == null) return null;
+            // Property element key (indexers get their param signature; plain
+            // properties get none) — identical to the element-emission path.
+            var propQualified = GetQualifiedRawName(declNode, declName) + NamingHelpers.GetParamSignature(declNode);
+            // The get/set accessor is a separate emitted element only when the
+            // declaration has an explicit accessor block (`{ get; set; }` /
+            // `{ get { } }`). Expression-bodied (`=> expr`) has no accessor
+            // element → target the property/indexer element directly so the
+            // edge still binds.
+            var wantKind = isWrite ? SyntaxKind.SetAccessorDeclaration : SyntaxKind.GetAccessorDeclaration;
+            var accessors = (declNode as BasePropertyDeclarationSyntax)?.AccessorList?.Accessors;
+            var hasAccessorElement = accessors?.Any(a => a.IsKind(wantKind)) ?? false;
+            var target = hasAccessorElement
+                ? $"{propQualified}/{(isWrite ? "set" : "get")}"
+                : propQualified;
+            return (declFilePath, target);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     if (node is TypeDeclarationSyntax typeDecl && typeDecl.BaseList != null)
     {
         var isClass = node is ClassDeclarationSyntax;
@@ -1607,6 +1659,33 @@ static object[] ExtractRelationships(
                 || seen.Contains($"references:{canonical}")) continue;
             seen.Add($"references:{canonical}");
             relationships.Add(new { type = "references", subtype = "identifier", targetName = canonical });
+        }
+    }
+
+    // Property / indexer access → `calls` to the accessor element. C# property
+    // access is a method call on the get/set accessor; modeling it only as a
+    // generic `references` left the call graph blind to it (Gate 5 /
+    // dotnet-l0-property-accessor-edges; mirrors TS 5.0.66/5.0.67). Reads → get,
+    // writes (LHS of assignment) → set. External/BCL accessors and plain fields
+    // resolve to null → no edge (strict-emit budget). Invocation callees are
+    // skipped here — `obj.M()` is a method call handled by the invocation loop.
+    foreach (var access in node.DescendantNodes())
+    {
+        bool isMember = access is MemberAccessExpressionSyntax;
+        bool isElement = access is ElementAccessExpressionSyntax;
+        if (!isMember && !isElement) continue;
+        // Skip the callee position of an invocation (that's a method call).
+        if (access.Parent is InvocationExpressionSyntax inv && inv.Expression == access) continue;
+        // Read vs write: LHS of any assignment → set-accessor; else get.
+        var isWrite = access.Parent is AssignmentExpressionSyntax asgn && asgn.Left == access;
+        var accessorTarget = ResolveAccessorTarget(access, isWrite);
+        if (accessorTarget != null)
+        {
+            AddWithTargetRef(
+                "calls",
+                isWrite ? "property-set" : "property-get",
+                accessorTarget.Value.QualifiedRawName,
+                accessorTarget.Value.FilePath);
         }
     }
 

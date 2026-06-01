@@ -2,6 +2,26 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.25.0] — 2026-06-01
+
+L0-.NET emission-completeness (Gate 5 of the L0-.NET baseline, Fathom row `dotnet-l0-emission-completeness-probe` 5.0.68.4). Closes the resolution-rate-invisible emission gaps — edges the analyzer *should* emit but skipped, which a 100% resolution rate cannot detect.
+
+### Added
+
+- **Property / indexer access → `calls` accessor edges** (the C# E2 closer; mirrors TS 5.0.66/5.0.67). `obj.Prop` (read) emits `calls`/property-get → the get-accessor element (`<class>:<prop>:get`); `obj.Prop = x` (write) → property-set; `obj[i]` → the indexer accessor/element. Resolved via the property symbol (`ResolveAccessorTarget`); plain fields and external/BCL accessors emit no edge. Previously these were modeled only as a generic `references` edge, leaving the call graph blind to all property access (+136 call-graph edges on the Utilities corpus alone).
+
+### Fixed
+
+- **Nested-type intra-class qualification.** Intra-class `callsMethod`/`accessesField` targets qualified with the immediate class name only (`MyDataTable/...`), so calls inside nested types (the ubiquitous typed-DataSet `MyDataSet.MyDataTable` pattern) dangled against the full element key (`mydataset:mydatatable:...`). Now qualifies with the full `GetQualifiedRawName` nested path.
+
+### Verified
+
+- **100% internal-call resolution across two independent corpora** (Utilities 827/827, MyPatientNow 6991/6991 — the latter a 22k-element typed-DataSet-heavy codebase that surfaced the nested-class gap). Full C# emission-completeness checklist verified + cataloged in the baseline doc.
+
+### Tests
+
+- 3 new integration tests (property get/set + field-negative, indexer via property test, nested-type intra-class) + the existing suite. 105 tests pass.
+
 ## [0.24.1] — 2026-06-01
 
 Internal-call resolution **99.71% → 100%** on PNE/Utilities (closes the 5.0.68.1 residual, Fathom row `dotnet-l0-partial-class-dispose-binding` 5.0.68.1.1).
