@@ -281,6 +281,31 @@ public class Outer {
     }
 
     [Fact]
+    public void IndexerAccess_WithExplicitAccessorBlock_TargetsAccessorWithoutParamSig()
+    {
+        // An indexer with an explicit `get { }` block emits a separate accessor
+        // element whose key OMITS the indexer's parameter signature
+        // (`store:indexer:get`, not `store:indexer-string:get`). The accessor-
+        // call target must match that — appending the indexer param sig left
+        // these dangling (surfaced on EnvisionWeb, Fathom 5.0.68.4).
+        var dir = MakeTempTree(("Store.cs", @"
+public class Store {
+    private int _v;
+    public int this[string key] { get { return _v; } }
+    public int Read(Store other, string k) { return other[k]; }
+}"));
+        try
+        {
+            var (edges, _) = AnalyzeFile(dir, "Store.cs");
+            Assert.Contains(edges, e => e.Type == "calls" && e.Subtype == "property-get"
+                && e.Target == "store/indexer/get");
+            // Must NOT carry the indexer param signature on the accessor target.
+            Assert.DoesNotContain(edges, e => e.Type == "calls" && e.Target.Contains("indexer-string"));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
     public void Delegate_EventHandlerSubscription_ResolvesToSignaturedHandler()
     {
         var dir = MakeTempTree(("Wiring.cs", @"

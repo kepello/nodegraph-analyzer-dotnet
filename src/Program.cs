@@ -1314,9 +1314,7 @@ static object[] ExtractRelationships(
             var declNode = declRefs[0].GetSyntax();
             var declName = GetDeclarationName(declNode);
             if (declName == null) return null;
-            // Property element key (indexers get their param signature; plain
-            // properties get none) — identical to the element-emission path.
-            var propQualified = GetQualifiedRawName(declNode, declName) + NamingHelpers.GetParamSignature(declNode);
+            var baseQualified = GetQualifiedRawName(declNode, declName);
             // The get/set accessor is a separate emitted element only when the
             // declaration has an explicit accessor block (`{ get; set; }` /
             // `{ get { } }`). Expression-bodied (`=> expr`) has no accessor
@@ -1325,9 +1323,17 @@ static object[] ExtractRelationships(
             var wantKind = isWrite ? SyntaxKind.SetAccessorDeclaration : SyntaxKind.GetAccessorDeclaration;
             var accessors = (declNode as BasePropertyDeclarationSyntax)?.AccessorList?.Accessors;
             var hasAccessorElement = accessors?.Any(a => a.IsKind(wantKind)) ?? false;
+            // The accessor element's natural key does NOT carry the property /
+            // indexer parameter signature — its `GetQualifiedRawName` recurses
+            // through the property name without re-adding the indexer's params
+            // (`DateRanges/indexer/get` → `dateranges:indexer:get`). So target
+            // the accessor WITHOUT the sig. Only the bare property / indexer
+            // element (expression-bodied, no accessor block) carries the sig
+            // (`dateranges:indexer-daterangetypes`). Indexers with explicit
+            // accessor blocks dangled pre-fix (EnvisionWeb, Fathom 5.0.68.4).
             var target = hasAccessorElement
-                ? $"{propQualified}/{(isWrite ? "set" : "get")}"
-                : propQualified;
+                ? $"{baseQualified}/{(isWrite ? "set" : "get")}"
+                : baseQualified + NamingHelpers.GetParamSignature(declNode);
             return (declFilePath, target);
         }
         catch

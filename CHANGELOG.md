@@ -2,6 +2,18 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.26.1] — 2026-06-01
+
+Indexer accessor-call fix surfaced by the EnvisionWeb corpus validation (Fathom row `dotnet-l0-emission-completeness-probe` 5.0.68.4).
+
+### Fixed
+
+- **Indexer accessor-call target dropped the indexer parameter signature.** An indexer with an explicit `get`/`set` block emits a separate accessor element whose natural key OMITS the indexer's parameter signature (`store:indexer:get`, not `store:indexer-string:get`) — its `GetQualifiedRawName` recurses through the property name without re-adding the indexer's params. `ResolveAccessorTarget` was building the accessor target *with* the sig, so every explicit-accessor-block indexer access dangled. Now: accessor-element target = `<class>/<member>/get|set` (no sig); only the bare property/indexer element (expression-bodied, no accessor block) carries the sig. Surfaced by EnvisionWeb (40 such danglers); covers both generic (`Dict<TKey,TValue>`) and non-generic indexers. New integration test.
+
+### Verified
+
+- **EnvisionWeb (1,864 C# files, ~103k call edges): 100% internal-call resolution** (102,796/102,796, 0 danglers) — the third and largest validation corpus, confirming the L0-.NET resolution work generalizes. 108 analyzer tests.
+
 ## [0.26.0] — 2026-06-01
 
 L0-.NET method entry-point inheritance (Gate 3 of the L0-.NET baseline, Fathom row `dotnet-l0-method-entrypoint-inheritance` 5.0.68.2).
