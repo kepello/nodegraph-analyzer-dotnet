@@ -1804,6 +1804,27 @@ static (string Kind, Dictionary<string, object?>? Trigger, Dictionary<string, ob
         return ("library-export", null, null, heuristicNote);
     }
 
+    // E1 — library-export-method: a PUBLIC method on a library-export type
+    // (public top-level type) is externally reachable via `new T().M()`, so it
+    // is a method-level entry point — not `none`. Mirrors the TS analyzer's
+    // `library-export-method` (Fathom rows 5.0.55 / 5.3.4.3.1) and closes the
+    // L0-.NET Gate 3 finding (public methods on library types defaulted to
+    // `none`, starving L1 stereotype / L2 capability-unit seeding). Methods
+    // named `Main` and HTTP-attributed methods are already classified above;
+    // constructors are `ConstructorDeclarationSyntax` (not `MethodDeclarationSyntax`)
+    // so excluded — they're reachable via the type. Accessibility-gated:
+    // private / protected / internal methods are not externally callable.
+    if (node is MethodDeclarationSyntax && accessibility == "public")
+    {
+        var containingType = node.Ancestors().OfType<TypeDeclarationSyntax>().FirstOrDefault();
+        if (containingType != null
+            && containingType.Modifiers.Any(mod => mod.IsKind(SyntaxKind.PublicKeyword))
+            && containingType.Ancestors().OfType<TypeDeclarationSyntax>().FirstOrDefault() == null)
+        {
+            return ("library-export-method", null, null, null);
+        }
+    }
+
     // E3 — auto-discovery heuristic: class-name pattern matched but no
     // first-class kind. Emit `other` + J1 limitation per closed-enum rule.
     if (heuristicNote != null && node is ClassDeclarationSyntax cls)

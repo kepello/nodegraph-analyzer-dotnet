@@ -2,6 +2,22 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.26.0] — 2026-06-01
+
+L0-.NET method entry-point inheritance (Gate 3 of the L0-.NET baseline, Fathom row `dotnet-l0-method-entrypoint-inheritance` 5.0.68.2).
+
+### Added
+
+- **`library-export-method` entry-point kind.** A PUBLIC method on a library-export type (public top-level type) is externally reachable via `new T().M()`, so it's a method-level entry point — not `none`. Mirrors the TS analyzer's `library-export-method` (5.0.55 / 5.3.4.3.1). Accessibility-gated: private/protected/internal methods stay `none` (not externally callable — followed the TS reference, which excludes protected, over the gate's looser "public/protected" wording). Constructors excluded (reachable via the type). Closes the Gate-3 finding where 93% of C# elements were `none` because public methods on library types never inherited an entry-point — starving L1 stereotype + L2 capability-unit seeding. Distribution shift: Utilities `none` 93%→89% (+137 `library-export-method`); MyPatientNow +611.
+
+### Tests
+
+- New integration test: public method on a public type → `library-export-method`; private method + public method on an internal type → `none`. 107 tests pass.
+
+### Known follow-on
+
+- Property get/set accessors on public properties are externally callable (TS extends `library-export-method` to them, 5.3.4.3.3) but C# derives an accessor's accessibility as `private` by default rather than inheriting the property's — so accessors aren't yet classified. Tracked as a parity follow-on.
+
 ## [0.25.0] — 2026-06-01
 
 L0-.NET emission-completeness (Gate 5 of the L0-.NET baseline, Fathom row `dotnet-l0-emission-completeness-probe` 5.0.68.4). Closes the resolution-rate-invisible emission gaps — edges the analyzer *should* emit but skipped, which a 100% resolution rate cannot detect.

@@ -98,6 +98,83 @@ public class CallResolutionIntegrationTests
         return (edges, limitations);
     }
 
+    /// <summary>Run the analyzer and return (elementName → entryPoint) for the
+    /// artifact ending with <paramref name="fileSuffix"/>.</summary>
+    private static Dictionary<string, string?> AnalyzeEntryPoints(string dir, string fileSuffix)
+    {
+        var dll = AnalyzerDll();
+        Assert.True(dll != null, "analyzer DLL not built");
+        var psi = new ProcessStartInfo("dotnet")
+        {
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        psi.ArgumentList.Add(dll!);
+        psi.ArgumentList.Add("--path");
+        psi.ArgumentList.Add(dir);
+        using var proc = Process.Start(psi)!;
+        proc.StandardInput.Write("{}");
+        proc.StandardInput.Close();
+        var stdout = proc.StandardOutput.ReadToEnd();
+        proc.WaitForExit(60_000);
+
+        var map = new Dictionary<string, string?>();
+        foreach (var line in stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            JsonDocument doc;
+            try { doc = JsonDocument.Parse(line); } catch { continue; }
+            using (doc)
+            {
+                var root = doc.RootElement;
+                if (!root.TryGetProperty("type", out var t) || t.GetString() != "artifact") continue;
+                var artifact = root.GetProperty("artifact");
+                var id = artifact.TryGetProperty("id", out var idEl) ? idEl.GetString() ?? "" : "";
+                if (!id.Replace('\\', '/').EndsWith(fileSuffix)) continue;
+                if (!artifact.TryGetProperty("elements", out var elements)) continue;
+                foreach (var el in elements.EnumerateArray())
+                {
+                    var name = el.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
+                    string? ep = el.TryGetProperty("entryPoint", out var e) ? e.GetString() : null;
+                    map[name] = ep;
+                }
+            }
+        }
+        return map;
+    }
+
+    [Fact]
+    public void EntryPoint_PublicMethodOnPublicType_IsLibraryExportMethod()
+    {
+        // L0-.NET Gate 3: a public method on a public top-level type is
+        // externally reachable → library-export-method, not `none`. Private
+        // methods and methods on internal types stay `none` (not externally
+        // callable). Mirrors TS library-export-method (5.0.55 / 5.3.4.3.1).
+        var dir = MakeTempTree(
+            ("Pub.cs", @"
+public class Pub {
+    public void Reachable() { }
+    private void Hidden() { }
+}"),
+            ("Internal.cs", @"
+class Internal {
+    public void NotExported() { }
+}"));
+        try
+        {
+            var ep = AnalyzeEntryPoints(dir, "Pub.cs");
+            Assert.Equal("library-export-method", ep.GetValueOrDefault("pub/reachable"));
+            Assert.Equal("none", ep.GetValueOrDefault("pub/hidden"));
+            Assert.Equal("library-export", ep.GetValueOrDefault("pub"));
+
+            var epInt = AnalyzeEntryPoints(dir, "Internal.cs");
+            // Public method on an INTERNAL type is not externally library-callable.
+            Assert.Equal("none", epInt.GetValueOrDefault("internal/notexported"));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
     private static string MakeTempTree(params (string Name, string Body)[] files)
     {
         var dir = Path.Combine(Path.GetTempPath(), "fathom-callres-" + Guid.NewGuid().ToString("N"));
