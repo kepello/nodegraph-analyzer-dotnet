@@ -89,4 +89,30 @@ public class NamingTests
     {
         Assert.Equal("a-b", NamingHelpers.Canonicalize("a...b"));
     }
+
+    // --- file-path case canonicalization (Fathom 5.0.68.1.1) ---------------
+
+    [Fact]
+    public void CanonicalizeFilePathCase_MapsToDiscoveredOnDiskCase()
+    {
+        // The .csproj references `FrmFieldValue.designer.cs` (lowercase) but the
+        // file on disk — and the analyzer's discovered path — is
+        // `FrmFieldValue.Designer.cs`. A resolved declaration path in the csproj
+        // case must normalize to the on-disk case so the cross-file targetRef
+        // string-matches the callee's element key.
+        var discovered = new[] { "/proj/FrmFieldValue.Designer.cs", "/proj/Other.cs" };
+        var map = NamingHelpers.BuildCanonicalPathMap(discovered);
+        Assert.Equal(
+            "/proj/FrmFieldValue.Designer.cs",
+            NamingHelpers.CanonicalizeFilePathCase("/proj/FrmFieldValue.designer.cs", map));
+    }
+
+    [Fact]
+    public void CanonicalizeFilePathCase_UnknownPath_ReturnedUnchanged()
+    {
+        // An external/library declaration path isn't a discovered file → leave
+        // it as-is (the caller emits no edge to it anyway).
+        var map = NamingHelpers.BuildCanonicalPathMap(new[] { "/proj/A.cs" });
+        Assert.Equal("/ext/Lib.cs", NamingHelpers.CanonicalizeFilePathCase("/ext/Lib.cs", map));
+    }
 }

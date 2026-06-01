@@ -2,6 +2,18 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.24.1] — 2026-06-01
+
+Internal-call resolution **99.71% → 100%** on PNE/Utilities (closes the 5.0.68.1 residual, Fathom row `dotnet-l0-partial-class-dispose-binding` 5.0.68.1.1).
+
+### Fixed
+
+- **File-path case divergence on cross-file edges.** Element natural keys use the analyzer's directory-walked (on-disk-case) path, but Roslyn's `SyntaxTree.FilePath` for a project document follows the case **as written in the .csproj `<Compile Include>`** — which differs for e.g. legacy WinForms `Foo.designer.cs` (csproj) vs `Foo.Designer.cs` (disk), invisible on a case-insensitive FS. A cross-file targetRef built from the Roslyn path then couldn't string-match the callee's element key → dangled. `ResolveCallTarget` / `ResolveTypeTarget` / `ResolveTargetFile` now normalize the resolved declaration path to the discovered on-disk case (`NamingHelpers.BuildCanonicalPathMap` + `CanonicalizeFilePathCase`). General fix (any csproj-case ≠ disk-case file), not just the 2 `frmFieldValue.Dispose(bool)` danglers it surfaced through.
+
+### Tests
+
+- 2 new `NamingTests` pinning the path-case normalization (csproj-case → disk-case; unknown path unchanged). 104 tests pass.
+
 ## [0.24.0] — 2026-06-01
 
 Internal call/constructor/delegate resolution overhaul (Fathom row `dotnet-l0-internal-call-resolution` 5.0.68.1). Closes Gate 1 of the L0-.NET baseline: internal-target `calls`/`callsMethod` resolution **66.31% → 99.71%** on PNE/Utilities. Unifying principle: every emitted call target must bind to the callee's element natural key, or emit no edge / a structured limitation — never a bare unbindable name.

@@ -27,6 +27,34 @@ static class NamingHelpers
     /// the declaration's element key are byte-identical (Fathom row
     /// <c>dotnet-l0-internal-call-resolution</c> 5.0.68.1).
     /// </summary>
+    /// <summary>
+    /// Build a case-folded lookup from the analyzer's discovered (on-disk-case)
+    /// file paths: lowercased path → the real discovered path. Ties keep the
+    /// first seen. Used to normalize a resolved declaration path (whose case
+    /// follows the .csproj `<Compile Include>`, not disk) back to the on-disk
+    /// case so a cross-file edge's targetRef string-matches the callee's
+    /// element key (Fathom row dotnet-l0-partial-class-dispose-binding 5.0.68.1.1).
+    /// </summary>
+    public static Dictionary<string, string> BuildCanonicalPathMap(IEnumerable<string> discoveredFiles)
+    {
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var f in discoveredFiles)
+        {
+            var key = f.ToLowerInvariant();
+            if (!map.ContainsKey(key)) map[key] = f;
+        }
+        return map;
+    }
+
+    /// <summary>
+    /// Normalize <paramref name="path"/> to the discovered on-disk case via
+    /// <paramref name="canonByLower"/> (built by <see cref="BuildCanonicalPathMap"/>).
+    /// Returns the path unchanged when it isn't a known discovered file (e.g.
+    /// an external/library declaration the caller won't emit an edge to anyway).
+    /// </summary>
+    public static string CanonicalizeFilePathCase(string path, IReadOnlyDictionary<string, string> canonByLower)
+        => canonByLower.TryGetValue(path.ToLowerInvariant(), out var real) ? real : path;
+
     public static string GetParamSignature(SyntaxNode node)
     {
         SeparatedSyntaxList<ParameterSyntax>? parameters = node switch

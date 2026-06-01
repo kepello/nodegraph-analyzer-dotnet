@@ -72,6 +72,18 @@ static void RunOutput(AnalyzerArgs args, AnalyzerConfig config, bool msbuildAvai
     var slnFiles = allFiles.Where(f => Path.GetExtension(f).Equals(".sln", StringComparison.OrdinalIgnoreCase)).ToList();
     Console.Error.WriteLine($".NET analyzer: found {csFiles.Count} .cs, {csprojFiles.Count} .csproj, {slnFiles.Count} .sln");
 
+    // Element natural keys are keyed by the directory-walked (on-disk-case)
+    // file path; but Roslyn's `SyntaxTree.FilePath` for a project document is
+    // the case AS WRITTEN in the .csproj `<Compile Include>`, which can differ
+    // (classic WinForms `Foo.designer.cs` in the csproj vs `Foo.Designer.cs`
+    // on disk — case-insensitive FS hides it). A cross-file targetRef built
+    // from the Roslyn path then can't string-match the element key → dangles
+    // (Fathom row dotnet-l0-partial-class-dispose-binding 5.0.68.1.1). Map any
+    // resolved declaration path back to the discovered on-disk case so both
+    // sides of the edge agree (rationale + logic in NamingHelpers).
+    var canonByLower = NamingHelpers.BuildCanonicalPathMap(csFiles);
+    string CanonicalizeFilePath(string p) => NamingHelpers.CanonicalizeFilePathCase(p, canonByLower);
+
     var startTime = DateTime.UtcNow;
     var elementsEmitted = 0;
 
@@ -146,7 +158,7 @@ static void RunOutput(AnalyzerArgs args, AnalyzerConfig config, bool msbuildAvai
                 compilationForFile = sharedCompilation;
                 treeForFile = tree;
             }
-            var artifact = BuildArtifact(content, filePath, config.IncludeComments, compilationForFile, treeForFile);
+            var artifact = BuildArtifact(content, filePath, config.IncludeComments, compilationForFile, treeForFile, CanonicalizeFilePath);
             if (artifact == null) return;
             Emit(new { type = "artifact", artifact });
             Interlocked.Increment(ref elementsEmitted);
@@ -207,10 +219,11 @@ static object? BuildArtifact(
     string filePath,
     bool includeComments,
     Compilation sharedCompilation,
-    SyntaxTree sharedTree)
+    SyntaxTree sharedTree,
+    Func<string, string> canonicalizeFilePath)
 {
     var (elements, artifactEdges, problems, limitations) = DecomposeWithRoslyn(
-        content, filePath, includeComments, sharedCompilation, sharedTree);
+        content, filePath, includeComments, sharedCompilation, sharedTree, canonicalizeFilePath);
 
     var artifact = new Dictionary<string, object?>
     {
@@ -275,7 +288,8 @@ static string? ExtractFileLeadingComment(string content)
 
 static (object[] elements, object[] artifactEdges, object[] problems, object[] limitations) DecomposeWithRoslyn(
     string content, string filePath, bool includeComments,
-    Compilation sharedCompilation, SyntaxTree tree)
+    Compilation sharedCompilation, SyntaxTree tree,
+    Func<string, string> canonicalizeFilePath)
 {
     var root = tree.GetRoot();
 
@@ -370,7 +384,7 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
 
         var sourceText = node.ToFullString().Trim();
         var contentHash = ComputeHash(sourceText);
-        var relationships = ExtractRelationships(node, allNames, semanticModel, filePath, limitationsAccumulator);
+        var relationships = ExtractRelationships(node, allNames, semanticModel, filePath, limitationsAccumulator, canonicalizeFilePath);
 
         // Type declarations emit explicit contains edges to their direct
         // members. Core treats these as authoritative for containment.
@@ -1128,7 +1142,8 @@ static object[] ExtractRelationships(
     HashSet<string> allNames,
     SemanticModel semanticModel,
     string currentFilePath,
-    List<object> limitations)
+    List<object> limitations,
+    Func<string, string> canonicalizeFilePath)
 {
     var relationships = new List<object>();
     var seen = new HashSet<string>();
@@ -1183,7 +1198,7 @@ static object[] ExtractRelationships(
             if (symbol is IAliasSymbol alias) symbol = alias.Target;
             var declRefs = symbol.DeclaringSyntaxReferences;
             if (declRefs.Length == 0) return null;
-            var declFilePath = declRefs[0].SyntaxTree.FilePath;
+            var declFilePath = canonicalizeFilePath(declRefs[0].SyntaxTree.FilePath);
             if (string.IsNullOrEmpty(declFilePath)) return null;
             if (declFilePath == currentFilePath) return null;
             return declFilePath;
@@ -1208,7 +1223,7 @@ static object[] ExtractRelationships(
             if (symbol is not IMethodSymbol method) return null;
             var declRefs = method.DeclaringSyntaxReferences;
             if (declRefs.Length == 0) return null;
-            var declFilePath = declRefs[0].SyntaxTree.FilePath;
+            var declFilePath = canonicalizeFilePath(declRefs[0].SyntaxTree.FilePath);
             if (string.IsNullOrEmpty(declFilePath)) return null;
             // Build the qualified raw name from the resolved declaration's
             // SYNTAX using the exact functions that build the element natural
@@ -1253,7 +1268,7 @@ static object[] ExtractRelationships(
             if (symbol is not INamedTypeSymbol named) return null;
             var declRefs = named.DeclaringSyntaxReferences;
             if (declRefs.Length == 0) return null;
-            var declFilePath = declRefs[0].SyntaxTree.FilePath;
+            var declFilePath = canonicalizeFilePath(declRefs[0].SyntaxTree.FilePath);
             if (string.IsNullOrEmpty(declFilePath)) return null;
             var declNode = declRefs[0].GetSyntax();
             var declName = GetDeclarationName(declNode);
