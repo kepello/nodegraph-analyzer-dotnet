@@ -15,6 +15,10 @@ public class IntraClassTests
 {
     private static List<(string Type, string? Subtype, string Target)> Extract(
         string classBody)
+        => ExtractFull(classBody).Edges;
+
+    private static (List<(string Type, string? Subtype, string Target)> Edges,
+        List<IntraClassHelpers.AmbiguousCall> Ambiguous) ExtractFull(string classBody)
     {
         var code = $"class C {{ {classBody} }}";
         var tree = CSharpSyntaxTree.ParseText(code);
@@ -24,11 +28,14 @@ public class IntraClassTests
             .First();
         var index = IntraClassHelpers.BuildIndex(typeDecl);
         var edges = new List<(string, string?, string)>();
+        var ambiguous = new List<IntraClassHelpers.AmbiguousCall>();
         foreach (var member in typeDecl.Members.OfType<MethodDeclarationSyntax>())
         {
-            edges.AddRange(IntraClassHelpers.ExtractEdges(member, index));
+            var result = IntraClassHelpers.ExtractEdges(member, index);
+            edges.AddRange(result.Edges);
+            ambiguous.AddRange(result.AmbiguousCalls);
         }
-        return edges;
+        return (edges, ambiguous);
     }
 
     // ---------- Positive baselines (non-shadowed cases still fire) ----------
@@ -60,7 +67,7 @@ public class IntraClassTests
             void Reset() { }
             void M() { Reset(); }
         ");
-        Assert.Contains(("callsMethod", (string?)null, "Reset"), edges);
+        Assert.Contains(("callsMethod", (string?)null, "Reset()"), edges);
     }
 
     // ---------- Shadowing cases (these should NOT fire) ----------
@@ -90,7 +97,7 @@ public class IntraClassTests
         ");
         Assert.DoesNotContain(
             edges,
-            e => e.Type == "callsMethod" && e.Target == "Reset");
+            e => e.Type == "callsMethod" && e.Target == "Reset()");
     }
 
     [Fact]
@@ -120,7 +127,7 @@ public class IntraClassTests
         ");
         Assert.DoesNotContain(
             edges,
-            e => e.Type == "callsMethod" && e.Target == "Reset");
+            e => e.Type == "callsMethod" && e.Target == "Reset()");
     }
 
     [Fact]
@@ -184,5 +191,51 @@ public class IntraClassTests
             void M(int count) { this.count = count; }
         ");
         Assert.Contains(("accessesField", (string?)"write", "count"), edges);
+    }
+
+    // ---------- callsMethod signature resolution (Fathom 5.0.68.1) ----------
+
+    [Fact]
+    public void CallsMethod_WithParams_EmitsSignaturedTarget()
+    {
+        // A same-class call to a method with parameters must carry the
+        // parameter signature so the target matches the method element key
+        // (`process(int,string)` → canonical `process-int-string`). The
+        // pre-fix bare `process` could only bind to a zero-arg method.
+        var edges = Extract(@"
+            void Process(int a, string b) { }
+            void M() { Process(1, ""x""); }
+        ");
+        Assert.Contains(("callsMethod", (string?)null, "Process(int,string)"), edges);
+        Assert.DoesNotContain(("callsMethod", (string?)null, "Process"), edges);
+    }
+
+    [Fact]
+    public void CallsMethod_DifferentArityOverloads_ResolvesByArgCount()
+    {
+        // Two overloads of different arity: the call's argument count selects
+        // exactly one. Each call site resolves to its matching overload.
+        var edges = Extract(@"
+            void Log(string m) { }
+            void Log(string m, int level) { }
+            void M() { Log(""a""); Log(""b"", 3); }
+        ");
+        Assert.Contains(("callsMethod", (string?)null, "Log(string)"), edges);
+        Assert.Contains(("callsMethod", (string?)null, "Log(string,int)"), edges);
+    }
+
+    [Fact]
+    public void CallsMethod_SameArityOverloads_EmitsAmbiguityNotEdge()
+    {
+        // Two overloads of the SAME arity differing only by type cannot be
+        // disambiguated syntactically → ambiguity surfaced, no guessed edge
+        // (Trade-off dotnet-callsmethod-overload-ambiguity 2.2.17).
+        var result = ExtractFull(@"
+            void Send(int x) { }
+            void Send(string x) { }
+            void M() { Send(""hi""); }
+        ");
+        Assert.DoesNotContain(result.Edges, e => e.Type == "callsMethod" && e.Target.StartsWith("Send"));
+        Assert.Contains(result.Ambiguous, a => a.MethodName == "Send" && a.OverloadCount == 2);
     }
 }

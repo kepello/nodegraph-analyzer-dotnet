@@ -58,7 +58,27 @@ static class IntraClassHelpers
     /// </summary>
     public sealed record ClassMemberIndex(
         HashSet<string> Fields,
-        HashSet<string> Methods);
+        HashSet<string> Methods,
+        IReadOnlyDictionary<string, List<MethodOverload>> MethodOverloads);
+
+    /// <summary>One method declaration's arity + canonical-ready parameter
+    /// signature (e.g. <c>(int,string)</c>), used to resolve a
+    /// <c>callsMethod</c> target to the exact element natural key.</summary>
+    public sealed record MethodOverload(int Arity, string Signature);
+
+    /// <summary>A same-class call to an overloaded method name that arity
+    /// alone cannot disambiguate (2+ overloads share the called arity, or a
+    /// method-group reference to an overloaded name). Surfaced as a
+    /// <c>csharp-ambiguous-overload</c> limitation rather than a guessed edge
+    /// (Trade-off <c>dotnet-callsmethod-overload-ambiguity</c> 2.2.17).</summary>
+    public sealed record AmbiguousCall(string MethodName, IReadOnlyList<int> Arities, int OverloadCount);
+
+    /// <summary>Result of <see cref="ExtractEdges"/>: the resolved intra-class
+    /// edges plus any same-arity-overload ambiguities the caller turns into
+    /// structured limitations.</summary>
+    public sealed record IntraClassResult(
+        List<(string Type, string? Subtype, string Target)> Edges,
+        List<AmbiguousCall> AmbiguousCalls);
 
     /// <summary>
     /// Build the member index for a type declaration. Includes fields,
@@ -69,6 +89,7 @@ static class IntraClassHelpers
     {
         var fields = new HashSet<string>();
         var methods = new HashSet<string>();
+        var overloads = new Dictionary<string, List<MethodOverload>>();
 
         foreach (var member in typeDecl.Members)
         {
@@ -94,6 +115,14 @@ static class IntraClassHelpers
                     break;
                 case MethodDeclarationSyntax md:
                     methods.Add(md.Identifier.Text);
+                    if (!overloads.TryGetValue(md.Identifier.Text, out var list))
+                    {
+                        list = new List<MethodOverload>();
+                        overloads[md.Identifier.Text] = list;
+                    }
+                    list.Add(new MethodOverload(
+                        md.ParameterList.Parameters.Count,
+                        NamingHelpers.GetParamSignature(md)));
                     break;
                 case ConstructorDeclarationSyntax:
                 case DestructorDeclarationSyntax:
@@ -102,15 +131,19 @@ static class IntraClassHelpers
             }
         }
 
-        return new ClassMemberIndex(fields, methods);
+        return new ClassMemberIndex(fields, methods, overloads);
     }
 
     /// <summary>
     /// Walk a method/property/accessor body and return the intra-class
-    /// edges it implies. Each member-name appears at most once per
-    /// edge type; the caller canonicalizes targetName before emitting.
+    /// edges it implies plus any unresolvable-by-arity overload ambiguities.
+    /// <c>callsMethod</c> targets carry the resolved parameter signature
+    /// (<c>method(int,string)</c>) so the emitted natural key matches the
+    /// callee's element key — fields/properties stay bare (no signature).
+    /// The caller canonicalizes + class-qualifies the target before emitting
+    /// (Fathom row <c>dotnet-l0-internal-call-resolution</c> 5.0.68.1).
     /// </summary>
-    public static List<(string Type, string? Subtype, string Target)> ExtractEdges(
+    public static IntraClassResult ExtractEdges(
         SyntaxNode body,
         ClassMemberIndex members)
     {
@@ -118,7 +151,9 @@ static class IntraClassHelpers
         // 2026-05-16): each access is classified as `read`, `write`, or
         // `readwrite` based on the surrounding syntactic context.
         var fieldAccess = new Dictionary<string, (bool Read, bool Write)>();
-        var calledMethods = new HashSet<string>();
+        // name → set of observed call arities. Arity -1 = a method-group /
+        // value reference with no call site (delegate binding) — arity unknown.
+        var calledMethodArities = new Dictionary<string, HashSet<int>>();
         var shadowedNames = CollectShadowedNames(body);
 
         void RecordFieldAccess(string name, string kind)
@@ -128,6 +163,18 @@ static class IntraClassHelpers
             if (kind == "write" || kind == "readwrite") existing.Write = true;
             fieldAccess[name] = existing;
         }
+
+        void RecordCall(string name, int arity)
+        {
+            if (!calledMethodArities.TryGetValue(name, out var arities))
+            {
+                arities = new HashSet<int>();
+                calledMethodArities[name] = arities;
+            }
+            arities.Add(arity);
+        }
+
+        static int ArgCount(InvocationExpressionSyntax inv) => inv.ArgumentList.Arguments.Count;
 
         foreach (var node in body.DescendantNodes())
         {
@@ -142,7 +189,8 @@ static class IntraClassHelpers
 
                 if (isCallee && members.Methods.Contains(name))
                 {
-                    calledMethods.Add(name);
+                    // `this.M(args)` / `base.M(args)` — arity from the call site.
+                    RecordCall(name, ArgCount((InvocationExpressionSyntax)access.Parent!));
                 }
                 else if (!isCallee && members.Fields.Contains(name))
                 {
@@ -150,7 +198,8 @@ static class IntraClassHelpers
                 }
                 else if (!isCallee && members.Methods.Contains(name))
                 {
-                    calledMethods.Add(name);
+                    // `this.M` as a value (method-group / delegate) — arity unknown.
+                    RecordCall(name, -1);
                 }
                 continue;
             }
@@ -165,7 +214,7 @@ static class IntraClassHelpers
                 && members.Methods.Contains(callee.Identifier.Text)
                 && !shadowedNames.Contains(callee.Identifier.Text))
             {
-                calledMethods.Add(callee.Identifier.Text);
+                RecordCall(callee.Identifier.Text, ArgCount(invocation));
                 continue;
             }
 
@@ -206,8 +255,8 @@ static class IntraClassHelpers
                 else
                 {
                     // Method name used as a value (delegate binding,
-                    // method-group reference). Treat as callsMethod.
-                    calledMethods.Add(name);
+                    // method-group reference). No call site → arity unknown.
+                    RecordCall(name, -1);
                 }
             }
         }
@@ -218,8 +267,61 @@ static class IntraClassHelpers
             var subtype = kinds.Read && kinds.Write ? "readwrite" : kinds.Write ? "write" : "read";
             edges.Add(("accessesField", subtype, name));
         }
-        foreach (var m in calledMethods) edges.Add(("callsMethod", null, m));
-        return edges;
+
+        // Resolve each called method name to the callee's signatured form so
+        // the emitted target matches the method element's natural key
+        // (`method(int,string)` → canonical `method-int-string`). Arity
+        // disambiguates overloads; residual same-arity ambiguity is surfaced
+        // as a limitation, never a guessed edge (Trade-off 2.2.17).
+        var ambiguous = new List<AmbiguousCall>();
+        foreach (var (name, arities) in calledMethodArities)
+        {
+            // Defensive: name was added only when present in members.Methods,
+            // so overloads should exist; skip if somehow absent.
+            if (!members.MethodOverloads.TryGetValue(name, out var overloads) || overloads.Count == 0)
+            {
+                continue;
+            }
+
+            var targets = new HashSet<string>();
+            if (overloads.Count == 1)
+            {
+                // Unique name — the only candidate is the target regardless of
+                // call arity (covers params / optional-argument calls too).
+                targets.Add(name + overloads[0].Signature);
+            }
+            else
+            {
+                var ambiguousArities = new List<int>();
+                foreach (var arity in arities)
+                {
+                    // arity -1 (method-group, unknown) against an overloaded
+                    // name cannot be resolved syntactically.
+                    var matches = arity < 0
+                        ? overloads
+                        : overloads.Where(o => o.Arity == arity).ToList();
+                    if (matches.Count == 1)
+                    {
+                        targets.Add(name + matches[0].Signature);
+                    }
+                    else
+                    {
+                        ambiguousArities.Add(arity);
+                    }
+                }
+                if (ambiguousArities.Count > 0)
+                {
+                    ambiguous.Add(new AmbiguousCall(name, ambiguousArities, overloads.Count));
+                }
+            }
+
+            foreach (var target in targets)
+            {
+                edges.Add(("callsMethod", null, target));
+            }
+        }
+
+        return new IntraClassResult(edges, ambiguous);
     }
 
     /// <summary>

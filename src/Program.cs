@@ -338,7 +338,7 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
         var elementKind = GetElementType(node);
         if (elementKind == null) continue;
 
-        var qualifiedRaw = GetQualifiedRawName(node, rawName) + GetParamSignature(node);
+        var qualifiedRaw = GetQualifiedRawName(node, rawName) + NamingHelpers.GetParamSignature(node);
         if (qualifiedNameCounts.TryGetValue(qualifiedRaw, out var count))
         {
             qualifiedNameCounts[qualifiedRaw] = count + 1;
@@ -370,7 +370,7 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
 
         var sourceText = node.ToFullString().Trim();
         var contentHash = ComputeHash(sourceText);
-        var relationships = ExtractRelationships(node, allNames, semanticModel, filePath);
+        var relationships = ExtractRelationships(node, allNames, semanticModel, filePath, limitationsAccumulator);
 
         // Type declarations emit explicit contains edges to their direct
         // members. Core treats these as authoritative for containment.
@@ -384,7 +384,7 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
             {
                 var memberRawName = GetDeclarationName(member);
                 if (memberRawName == null) continue;
-                var memberQualified = $"{qualifiedRaw}/{memberRawName}{GetParamSignature(member)}";
+                var memberQualified = $"{qualifiedRaw}/{memberRawName}{NamingHelpers.GetParamSignature(member)}";
                 var memberCanonical = CanonicalizePath(memberQualified);
                 if (!string.IsNullOrEmpty(memberCanonical))
                 {
@@ -423,16 +423,20 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
                 var className = containingType.Identifier.Text;
                 var canonicalClass = Canonicalize(className);
                 var rels = relationships.ToList();
-                foreach (var (edgeType, subtype, target) in IntraClassHelpers.ExtractEdges(node, memberIndex))
+                var intraResult = IntraClassHelpers.ExtractEdges(node, memberIndex);
+                foreach (var (edgeType, subtype, target) in intraResult.Edges)
                 {
                     var canonicalTarget = Canonicalize(target);
                     if (string.IsNullOrEmpty(canonicalTarget)) continue;
                     // Per language-conformance B1: qualify intra-class
                     // targets with the class name (`class/member`) so the
                     // emitted targetName resolves to the actual element's
-                    // natural key. Without this, `accessesField` edges
-                    // stayed dangling. Mirrors the TS analyzer's
-                    // intra-class edge composition (Fathom row 3.2.1).
+                    // natural key. `callsMethod` targets arrive
+                    // signature-suffixed (`method(int)`) so they match the
+                    // method element's natural key (Fathom row 5.0.68.1);
+                    // `accessesField` targets are bare field names. Without
+                    // this, intra-class edges stayed dangling. Mirrors the TS
+                    // analyzer's intra-class edge composition (Fathom 3.2.1).
                     var qualifiedTarget = string.IsNullOrEmpty(canonicalClass)
                         ? canonicalTarget
                         : $"{canonicalClass}/{canonicalTarget}";
@@ -446,6 +450,35 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
                     }
                 }
                 relationships = rels.ToArray();
+
+                // Same-arity overload ambiguity → structured limitation, not a
+                // guessed edge (Trade-off dotnet-callsmethod-overload-ambiguity
+                // 2.2.17). Syntactic resolution can't pick among overloads that
+                // share the called arity without type inference.
+                foreach (var amb in intraResult.AmbiguousCalls)
+                {
+                    var ambSpan = node.GetLocation().GetLineSpan();
+                    limitationsAccumulator.Add(new Dictionary<string, object?>
+                    {
+                        ["kind"] = "csharp-ambiguous-overload",
+                        ["severity"] = "minor",
+                        ["location"] = new Dictionary<string, object?>
+                        {
+                            ["file"] = filePath,
+                            ["startLine"] = ambSpan.StartLinePosition.Line + 1,
+                            ["endLine"] = ambSpan.EndLinePosition.Line + 1,
+                        },
+                        ["description"] = $"Same-class call to overloaded method '{amb.MethodName}' "
+                            + $"could not be resolved to a specific overload by argument count "
+                            + $"({amb.OverloadCount} overloads share the called arity); callsMethod edge omitted.",
+                        ["metadata"] = new Dictionary<string, object?>
+                        {
+                            ["methodName"] = amb.MethodName,
+                            ["overloadCount"] = amb.OverloadCount,
+                            ["arities"] = amb.Arities,
+                        },
+                    });
+                }
             }
         }
 
@@ -886,23 +919,9 @@ static string CanonicalizePath(string raw)
 /// surface mirrors Swift's `paramSignature` in nodegraph-analyzer-swift
 /// (Fathom 2.2.21).
 /// </summary>
-static string GetParamSignature(SyntaxNode node)
-{
-    SeparatedSyntaxList<ParameterSyntax>? parameters = node switch
-    {
-        BaseMethodDeclarationSyntax m => m.ParameterList.Parameters,
-        LocalFunctionStatementSyntax lf => lf.ParameterList.Parameters,
-        IndexerDeclarationSyntax idx => idx.ParameterList.Parameters,
-        _ => null
-    };
-    if (parameters == null) return string.Empty;
-    if (parameters.Value.Count == 0) return "()";
-    var types = parameters.Value.Select(p =>
-        (p.Type?.ToString() ?? "")
-            .Replace("/", "-")
-            .Replace(" ", ""));
-    return "(" + string.Join(",", types) + ")";
-}
+// GetParamSignature moved to NamingHelpers (Program.Naming.cs) so the
+// intra-class callsMethod resolver builds byte-identical signatures
+// (Fathom 5.0.68.1). Call sites use NamingHelpers.GetParamSignature.
 
 static string GetQualifiedRawName(SyntaxNode node, string rawName)
 {
@@ -1108,7 +1127,8 @@ static object[] ExtractRelationships(
     SyntaxNode node,
     HashSet<string> allNames,
     SemanticModel semanticModel,
-    string currentFilePath)
+    string currentFilePath,
+    List<object> limitations)
 {
     var relationships = new List<object>();
     var seen = new HashSet<string>();
@@ -1190,20 +1210,58 @@ static object[] ExtractRelationships(
             if (declRefs.Length == 0) return null;
             var declFilePath = declRefs[0].SyntaxTree.FilePath;
             if (string.IsNullOrEmpty(declFilePath)) return null;
-            // Build the parameter signature in canonicalized form.
-            var paramTypes = method.Parameters.Select(p =>
-                p.Type.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat));
-            var sig = method.Parameters.Length == 0
-                ? "()"
-                : "(" + string.Join(",", paramTypes) + ")";
-            // Qualify with the containing type so the target natural key
-            // matches the declaration's class-qualified form (`runner/run-parsedargs`).
-            var rawName = method.Name + sig;
-            if (method.ContainingType != null && method.MethodKind == MethodKind.Ordinary)
-            {
-                rawName = $"{method.ContainingType.Name}/{rawName}";
-            }
-            return (declFilePath, rawName);
+            // Build the qualified raw name from the resolved declaration's
+            // SYNTAX using the exact functions that build the element natural
+            // key (Program.cs line ~341: `GetQualifiedRawName + GetParamSignature`).
+            // Deriving from syntax — not from the semantic symbol's
+            // `ContainingType.Name` + `ToDisplayString` signature — guarantees
+            // the emitted targetRef is byte-identical to the callee's element
+            // key after CanonicalizePath, including nested-class qualification
+            // (`Outer/Inner/M`) and the syntactic param-type spelling. The
+            // semantic form diverged on both, leaving resolved-but-unbindable
+            // `calls` edges (Fathom row dotnet-l0-internal-call-resolution
+            // 5.0.68.1). Returns null when the declaration isn't a named
+            // member shape (kept conservative — no guessed target).
+            var declNode = declRefs[0].GetSyntax();
+            var declName = GetDeclarationName(declNode);
+            if (declName == null) return null;
+            var qualifiedRaw = GetQualifiedRawName(declNode, declName) + NamingHelpers.GetParamSignature(declNode);
+            return (declFilePath, qualifiedRaw);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    // Resolve a type reference (e.g. the `T` in `new T(...)`) to its
+    // declaring file + the type's qualified raw name, built from the
+    // declaration SYNTAX via the same key functions as element emission so
+    // the targetRef binds to the type's element key (nested types included).
+    // Returns null for external/BCL types (no DeclaringSyntaxReferences) — the
+    // caller then emits no edge, which also drops the false-positive
+    // constructor edges the old name-only `allNames` match produced when a
+    // BCL type name (e.g. `ResourceManager`) collided with a same-named local
+    // member (Fathom row dotnet-l0-internal-call-resolution 5.0.68.1).
+    (string FilePath, string QualifiedRawName)? ResolveTypeTarget(SyntaxNode typeNode)
+    {
+        try
+        {
+            var symbolInfo = semanticModel.GetSymbolInfo(typeNode);
+            var symbol = symbolInfo.Symbol ?? symbolInfo.CandidateSymbols.FirstOrDefault();
+            if (symbol is IAliasSymbol alias) symbol = alias.Target;
+            if (symbol is not INamedTypeSymbol named) return null;
+            var declRefs = named.DeclaringSyntaxReferences;
+            if (declRefs.Length == 0) return null;
+            var declFilePath = declRefs[0].SyntaxTree.FilePath;
+            if (string.IsNullOrEmpty(declFilePath)) return null;
+            var declNode = declRefs[0].GetSyntax();
+            var declName = GetDeclarationName(declNode);
+            if (declName == null) return null;
+            // Types carry no parameter signature — the qualified raw name is
+            // the canonical element key for the class / struct / interface.
+            var qualifiedRaw = GetQualifiedRawName(declNode, declName);
+            return (declFilePath, qualifiedRaw);
         }
         catch
         {
@@ -1285,9 +1343,36 @@ static object[] ExtractRelationships(
             }
             else if (allNames.Contains(calledName))
             {
-                // Same-file call without resolved signature: emit bare-name
-                // form per the existing same-file convention.
-                Add("calls", "direct", calledName);
+                // Semantic resolution failed for an in-file call. The bare-name
+                // fallback that used to fire here emitted an unqualified,
+                // unsignatured target that could never bind to the callee's
+                // element key — a phantom edge that obscured the resolution
+                // failure (Fathom row dotnet-l0-internal-call-resolution
+                // 5.0.68.1). Instead record a structured limitation; never
+                // emit an unbindable edge. Common causes: event / delegate
+                // `Invoke` (not a method declaration) and degraded compilations
+                // (unresolved references on unrestored legacy csprojs). Same-
+                // class method calls are still captured as `callsMethod`
+                // cohesion edges, which resolve via the signatured target.
+                var callSpan = invocation.GetLocation().GetLineSpan();
+                limitations.Add(new Dictionary<string, object?>
+                {
+                    ["kind"] = "csharp-unresolved-call",
+                    ["severity"] = "minor",
+                    ["location"] = new Dictionary<string, object?>
+                    {
+                        ["file"] = currentFilePath,
+                        ["startLine"] = callSpan.StartLinePosition.Line + 1,
+                        ["endLine"] = callSpan.EndLinePosition.Line + 1,
+                    },
+                    ["description"] = $"Call to in-file symbol '{calledName}' could not be resolved "
+                        + "to a method declaration (event/delegate invoke or degraded compilation); "
+                        + "calls edge omitted rather than emitting an unbindable bare-name target.",
+                    ["metadata"] = new Dictionary<string, object?>
+                    {
+                        ["calledName"] = calledName,
+                    },
+                });
             }
         }
     }
@@ -1295,10 +1380,17 @@ static object[] ExtractRelationships(
     {
         foreach (var creation in node.DescendantNodes().OfType<ObjectCreationExpressionSyntax>())
         {
-            var typeName = creation.Type.ToString().Split('<')[0].Split('.').Last();
             // B1 calls subtype core (Stage 3a): `constructor` for `new T(...)`.
-            if (allNames.Contains(typeName) && typeName != GetDeclarationName(node))
-                Add("calls", "constructor", typeName);
+            // Resolve the type semantically so the target binds to the type's
+            // element key cross-file, and so external/BCL types (no declaration)
+            // emit no edge — replacing the old name-only `allNames` match that
+            // both missed cross-file types and false-matched BCL type names
+            // against same-named local members (Fathom row 5.0.68.1).
+            var typeTarget = ResolveTypeTarget(creation.Type);
+            if (typeTarget != null)
+            {
+                AddWithTargetRef("calls", "constructor", typeTarget.Value.QualifiedRawName, typeTarget.Value.FilePath);
+            }
         }
     }
 
@@ -1403,8 +1495,36 @@ static object[] ExtractRelationships(
                 MemberAccessExpressionSyntax ma => ma.Name.Identifier.Text,
                 _ => null
             };
-            if (handlerName != null && allNames.Contains(handlerName))
-                Add("calls", "delegates", handlerName);
+            if (handlerName == null || !allNames.Contains(handlerName)) continue;
+            // `event += handler` — resolve the handler method to its signatured
+            // element key so the delegate edge binds (was a bare name that
+            // could not bind — Fathom row 5.0.68.1). Unresolvable handlers
+            // (method-group of an external type, etc.) record a limitation
+            // rather than emit an unbindable bare edge.
+            var handlerTarget = ResolveCallTarget(assign.Right);
+            if (handlerTarget != null)
+            {
+                AddWithTargetRef("calls", "delegates", handlerTarget.Value.QualifiedRawName, handlerTarget.Value.FilePath);
+            }
+            else
+            {
+                var hSpan = assign.GetLocation().GetLineSpan();
+                limitations.Add(new Dictionary<string, object?>
+                {
+                    ["kind"] = "csharp-unresolved-call",
+                    ["severity"] = "minor",
+                    ["location"] = new Dictionary<string, object?>
+                    {
+                        ["file"] = currentFilePath,
+                        ["startLine"] = hSpan.StartLinePosition.Line + 1,
+                        ["endLine"] = hSpan.EndLinePosition.Line + 1,
+                    },
+                    ["description"] = $"Event-handler '{handlerName}' in a `+=` subscription could not be "
+                        + "resolved to a method declaration; delegates edge omitted rather than emitting "
+                        + "an unbindable bare-name target.",
+                    ["metadata"] = new Dictionary<string, object?> { ["calledName"] = handlerName },
+                });
+            }
         }
     }
 

@@ -7,9 +7,44 @@
 /// </summary>
 
 using System.Text;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 static class NamingHelpers
 {
+    /// <summary>
+    /// Build the parameter-type signature segment appended to a method /
+    /// constructor / indexer raw name before canonicalization, e.g.
+    /// <c>(object,CameraEventArgs)</c>. Zero parameters → <c>()</c>; a node
+    /// with no parameter list → empty string. Param types drop generic spaces
+    /// and replace nested <c>/</c> so the signature survives
+    /// <see cref="Canonicalize"/> as a single dash-joined run
+    /// (<c>method-object-cameraeventargs</c>).
+    ///
+    /// Single source of truth shared by the element natural-key construction
+    /// (<c>Program.cs</c>) and the intra-class <c>callsMethod</c> target
+    /// resolution (<c>Program.IntraClass.cs</c>) so an edge's target key and
+    /// the declaration's element key are byte-identical (Fathom row
+    /// <c>dotnet-l0-internal-call-resolution</c> 5.0.68.1).
+    /// </summary>
+    public static string GetParamSignature(SyntaxNode node)
+    {
+        SeparatedSyntaxList<ParameterSyntax>? parameters = node switch
+        {
+            BaseMethodDeclarationSyntax m => m.ParameterList.Parameters,
+            LocalFunctionStatementSyntax lf => lf.ParameterList.Parameters,
+            IndexerDeclarationSyntax idx => idx.ParameterList.Parameters,
+            _ => null
+        };
+        if (parameters == null) return string.Empty;
+        if (parameters.Value.Count == 0) return "()";
+        var types = parameters.Value.Select(p =>
+            (p.Type?.ToString() ?? "")
+                .Replace("/", "-")
+                .Replace(" ", ""));
+        return "(" + string.Join(",", types) + ")";
+    }
+
     /// <summary>
     /// Canonicalize a single name segment. Lowercases ASCII letters,
     /// keeps digits and underscores verbatim, and collapses runs of

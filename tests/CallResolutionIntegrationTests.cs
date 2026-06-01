@@ -1,0 +1,173 @@
+using System.Diagnostics;
+using System.Text.Json;
+
+namespace NodegraphAnalyzerDotnet.Tests;
+
+/// <summary>
+/// End-to-end call/constructor/delegate resolution tests (Fathom row
+/// dotnet-l0-internal-call-resolution 5.0.68.1). These exercise the
+/// orchestration in <c>Program.cs</c> — which is NOT compiled into this test
+/// project (it's a top-level-statements program) — by spawning the built
+/// analyzer DLL on a temp source tree and parsing its NDJSON output.
+///
+/// Pins the invariant the L0-.NET resolution gate enforces: every emitted
+/// `calls` / `callsMethod` target is class-qualified + signatured so it binds
+/// to the callee's element natural key; no bare-name targets are emitted, and
+/// unresolvable shapes produce a structured limitation instead of a phantom
+/// edge.
+/// </summary>
+public class CallResolutionIntegrationTests
+{
+    private static string? AnalyzerDll()
+    {
+        // tests/bin/Debug/net9.0/<asm>.dll → package root → src/bin/.../analyzer.dll
+        var dir = Path.GetDirectoryName(typeof(CallResolutionIntegrationTests).Assembly.Location)!;
+        for (var probe = new DirectoryInfo(dir); probe != null; probe = probe.Parent)
+        {
+            var candidate = Path.Combine(probe.FullName, "src", "bin", "Debug", "net9.0", "NodegraphAnalyzerDotnet.dll");
+            if (File.Exists(candidate)) return candidate;
+        }
+        return null;
+    }
+
+    /// <summary>Run the analyzer on <paramref name="dir"/> and return the
+    /// element-level edges (type, subtype, targetName, hasTargetRef) for the
+    /// artifact whose path ends with <paramref name="fileSuffix"/>, plus that
+    /// artifact's limitation kinds.</summary>
+    private static (List<(string Type, string? Subtype, string Target, bool HasTargetRef)> Edges,
+        List<string> LimitationKinds)
+        AnalyzeFile(string dir, string fileSuffix)
+    {
+        var dll = AnalyzerDll();
+        Assert.True(dll != null, "analyzer DLL not built — run `dotnet build src -c Debug`");
+
+        var psi = new ProcessStartInfo("dotnet")
+        {
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        psi.ArgumentList.Add(dll!);
+        psi.ArgumentList.Add("--path");
+        psi.ArgumentList.Add(dir);
+        using var proc = Process.Start(psi)!;
+        // The analyzer always reads its config slice from stdin (orchestrator
+        // contract). Empty object → all defaults.
+        proc.StandardInput.Write("{}");
+        proc.StandardInput.Close();
+        var stdout = proc.StandardOutput.ReadToEnd();
+        proc.WaitForExit(60_000);
+
+        var edges = new List<(string, string?, string, bool)>();
+        var limitations = new List<string>();
+        foreach (var line in stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            JsonDocument doc;
+            try { doc = JsonDocument.Parse(line); } catch { continue; }
+            using (doc)
+            {
+                var root = doc.RootElement;
+                if (!root.TryGetProperty("type", out var t) || t.GetString() != "artifact") continue;
+                var artifact = root.GetProperty("artifact");
+                var id = artifact.TryGetProperty("id", out var idEl) ? idEl.GetString() ?? "" : "";
+                if (!id.Replace('\\', '/').EndsWith(fileSuffix)) continue;
+
+                if (artifact.TryGetProperty("limitations", out var lims) && lims.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var lim in lims.EnumerateArray())
+                    {
+                        if (lim.TryGetProperty("kind", out var k)) limitations.Add(k.GetString() ?? "");
+                    }
+                }
+                if (!artifact.TryGetProperty("elements", out var elements)) continue;
+                foreach (var el in elements.EnumerateArray())
+                {
+                    if (!el.TryGetProperty("edges", out var elEdges) || elEdges.ValueKind != JsonValueKind.Array) continue;
+                    foreach (var e in elEdges.EnumerateArray())
+                    {
+                        var type = e.TryGetProperty("type", out var ty) ? ty.GetString() ?? "" : "";
+                        var subtype = e.TryGetProperty("subtype", out var st) ? st.GetString() : null;
+                        var target = e.TryGetProperty("targetName", out var tn) ? tn.GetString() ?? "" : "";
+                        var hasRef = e.TryGetProperty("targetRef", out _);
+                        edges.Add((type, subtype, target, hasRef));
+                    }
+                }
+            }
+        }
+        return (edges, limitations);
+    }
+
+    private static string MakeTempTree(params (string Name, string Body)[] files)
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "fathom-callres-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        foreach (var (name, body) in files) File.WriteAllText(Path.Combine(dir, name), body);
+        return dir;
+    }
+
+    [Fact]
+    public void CallsMethod_SameClassWithParams_EmitsSignaturedQualifiedTarget()
+    {
+        var dir = MakeTempTree(("Service.cs", @"
+public class Service {
+    public void Process(int a, string b) { }
+    public void Run() { Process(1, ""x""); }
+}"));
+        try
+        {
+            var (edges, _) = AnalyzeFile(dir, "Service.cs");
+            // callsMethod target must be class-qualified + signatured so it binds
+            // to the method element key `service:process-int-string`.
+            Assert.Contains(edges, e => e.Type == "callsMethod" && e.Target == "service/process-int-string");
+            // No bare/unsignatured callsMethod target.
+            Assert.DoesNotContain(edges, e => e.Type == "callsMethod" && e.Target == "service/process");
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void Constructor_WorkspaceType_ResolvesWithTargetRef_ExternalTypeEmitsNoEdge()
+    {
+        var dir = MakeTempTree(
+            ("App.cs", @"
+public class App {
+    public void Build() {
+        var w = new Worker();
+        var sb = new System.Text.StringBuilder();
+    }
+}"),
+            ("Worker.cs", "public class Worker { }"));
+        try
+        {
+            var (edges, _) = AnalyzeFile(dir, "App.cs");
+            // Workspace type → constructor edge bound to the type element.
+            Assert.Contains(edges, e => e.Type == "calls" && e.Subtype == "constructor" && e.Target == "worker");
+            // External BCL type (StringBuilder) → no edge (no false-positive,
+            // no dangling) — the whole point of resolving the type.
+            Assert.DoesNotContain(edges, e => e.Type == "calls" && e.Subtype == "constructor"
+                && e.Target.Contains("stringbuilder"));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void Delegate_EventHandlerSubscription_ResolvesToSignaturedHandler()
+    {
+        var dir = MakeTempTree(("Wiring.cs", @"
+using System;
+public class Wiring {
+    public event EventHandler Tick;
+    public void Hook() { this.Tick += OnTick; }
+    private void OnTick(object s, EventArgs e) { }
+}"));
+        try
+        {
+            var (edges, _) = AnalyzeFile(dir, "Wiring.cs");
+            // The `+= OnTick` handler resolves to the signatured method element.
+            Assert.Contains(edges, e => e.Type == "calls" && e.Subtype == "delegates"
+                && e.Target.StartsWith("wiring/ontick"));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+}

@@ -2,6 +2,29 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.24.0] — 2026-06-01
+
+Internal call/constructor/delegate resolution overhaul (Fathom row `dotnet-l0-internal-call-resolution` 5.0.68.1). Closes Gate 1 of the L0-.NET baseline: internal-target `calls`/`callsMethod` resolution **66.31% → 99.71%** on PNE/Utilities. Unifying principle: every emitted call target must bind to the callee's element natural key, or emit no edge / a structured limitation — never a bare unbindable name.
+
+### Fixed
+
+- **Intra-class `callsMethod` now signature-qualified.** Was class-qualified but sig-less (`class/method`), binding only to zero-arg methods (40% resolution). Resolves the called name against the class's overloads by **arity** and emits `class/method(int,string)` → matches the method element key. Same-arity overloads → `csharp-ambiguous-overload` limitation (no guessed edge). The 167-dangler bulk; callsMethod → 100%.
+- **`new T()` constructor + `event += handler` delegate resolution.** Replaced loose name-only `allNames` matching + bare cross-file-unaware `Add` with semantic resolution: new `ResolveTypeTarget` resolves the `new` type → cross-file `AddWithTargetRef` to the type's element key; external/BCL types (no declaration) emit no edge — eliminating false-positives (e.g. `new ResourceManager()` matching a local `ResourceManager` property). Delegate handlers resolve via `ResolveCallTarget`, else a `csharp-unresolved-call` limitation.
+- **`ResolveCallTarget` derives its target from the resolved declaration's syntax** (`GetQualifiedRawName` + `GetParamSignature`, the element-key functions) instead of the semantic `ContainingType.Name` + `ToDisplayString` signature — fixing nested-class qualification and signature-spelling divergence.
+- **`calls` bare-name fallback removed** — semantic-resolution failure now records a `csharp-unresolved-call` limitation instead of a phantom unbindable edge.
+
+### Changed
+
+- `GetParamSignature` moved to shared `NamingHelpers` (single source of truth for the edge target + element key signature).
+
+### Tests
+
+- 3 new `IntraClassTests` (signatured target, arity disambiguation, same-arity-ambiguity limitation) + new `CallResolutionIntegrationTests` (subprocess end-to-end: constructor cross-file + BCL-no-edge, delegate, callsMethod) pinning the `Program.cs` orchestration the unit project doesn't compile. 102 tests pass.
+
+### Residual
+
+- 2/691 csharp danglers = WinForms partial-class `Dispose(bool)` (Fathom follow-on 5.0.68.1.1). 0.29%, well past the 98% gate.
+
 ## [0.23.0] — 2026-05-28
 
 Two-hash adoption (Fathom row 1.12.5): emit `sourceHash` (renamed from `contentHash`) on every artifact/element — it always held a source hash. The overlay composes the substrate `contentHash` from it, so an analyzer-rule change that doesn't touch source still re-tips. Peer dep on `@kepello/nodegraph-analysis` retargeted to `^3.0.0`.
