@@ -2,6 +2,20 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.29.0] — 2026-06-02
+
+L1 stereotype-precision overhaul — **Stage 2 (.NET analyzer)** (Fathom row `l1a-stereotype-derivation-precise` 3.1.1.1). Emits the two new F6 return-shape facts (`accessesField.subtype` was already emitted, 0.25.0). The L1 derivation rules consume these at Stage 4.
+
+### Added
+
+- **`returnKind` facet** (`void` / `boolean` / `primitive` / `reference` / `collection` / `unknown`) — resolved via the `SemanticModel` (categorizes the return `ITypeSymbol`: enums → primitive, arrays / `IEnumerable` implementers → collection, etc.) with a **syntactic fallback** for orphan files whose Compilation can't bind the type. `Task`/`ValueTask` and `Nullable<T>` are unwrapped (an `async Task<bool>` predicate reads as `boolean`). New `Program.ReturnShape.cs`.
+- **`returnsField` facet** (boolean) — true iff a body-bearing get-shaped member returns an own-class field/property directly. Reuses the intra-class member-field index and matches the same forms the LCOM4 extractor uses: `this.X` / `base.X` member access **and** the bare `return _backingField;` C# convention; handles expression-bodied getters (`=> _x`). Walks top-level returns only (skips nested lambdas / local functions).
+- Both for body-bearing callables only; setters / init / event accessors / destructors → `void` + `returnsField=false`; constructors → `reference` + `false`.
+
+### Validation
+
+- 5 integration tests (spawn the built DLL): every `returnKind` category (incl. `Task<bool>`→boolean unwrap + enum→primitive), the backing-field / `this.X` / expression-bodied getter `returnsField` cases vs computed-value false, setter void, constructor reference. 116 tests pass. Scale check on the Utilities corpus (517 methods): `returnKind` resolves with **0% `unknown`** (void 236, reference 136, boolean 73, primitive 59, collection 13); `returnsField` fires 38× — the getter detection works on real OO code (vs 1× on the functional TS corpus).
+
 ## [0.28.0] — 2026-06-02
 
 L1 stereotype-precision group (Fathom `l1-dotnet-baseline` 5.5.0, fix #2 analyzer side).

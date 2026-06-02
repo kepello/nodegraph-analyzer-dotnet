@@ -475,6 +475,12 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
         // density derivations. Returns null for nodes without a body.
         var scalars = ScalarHelpers.Extract(node);
 
+        // F6 return-shape facets (Fathom 3.1.1.1 Stage 2). Populated in the
+        // body-bearing block below (reuses the intra-class member-field
+        // index for returnsField); null for non-body-bearing declarations.
+        string? returnKindFacet = null;
+        bool? returnsFieldFacet = null;
+
         // Intra-class edges (slice 3, LCOM4 input): accessesField and
         // callsMethod fire from a method body to a member of the same
         // type. Cross-type references continue to use the existing
@@ -486,6 +492,10 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
             if (containingType != null)
             {
                 var memberIndex = IntraClassHelpers.BuildIndex(containingType);
+                // F6 return-shape (reuses the member-field index for the
+                // returnsField `return _x;` / `return this.X;` detection).
+                (returnKindFacet, returnsFieldFacet) =
+                    ReturnShapeHelpers.Extract(node, semanticModel, memberIndex.Fields);
                 // Qualify with the FULL nested-type path (`MyDataSet/MyDataTable`),
                 // not just the immediate class name, so intra-class targets bind
                 // to the nested member's element key (`mydataset:mydatatable:...`).
@@ -733,6 +743,12 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
             element["dispatchKind"] = "static";
             element["callableRole"] = "constructor";
         }
+
+        // F6 — return-shape facets (returnKind via SemanticModel + syntactic
+        // fallback; returnsField via own-field return detection). Body-bearing
+        // callables only; the L1 methodStereotype rules consume these at S4.
+        if (returnKindFacet != null) element["returnKind"] = returnKindFacet;
+        if (returnsFieldFacet != null) element["returnsField"] = returnsFieldFacet;
 
         // Language-conformance Group G — canonical documentation.
         // G1 `documentation` carries parsed XML-doc tag content; G2
