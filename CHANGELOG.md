@@ -2,6 +2,14 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.28.0] — 2026-06-02
+
+L1 stereotype-precision group (Fathom `l1-dotnet-baseline` 5.5.0, fix #2 analyzer side).
+
+### Added
+
+- **`event-handler` entryPoint** — `DetectEntryPoint` emits the deferred E-catalogue `event-handler` kind for methods matching the .NET event-callback convention `(object sender, TEventArgs e)` (exactly 2 params; first `object`/`object?`; second a type whose simple name ends in `EventArgs` — WinForms/WebForms/WPF/`EventHandler<T>`; derived EventArgs included). The L1 `methodStereotype` derivation (`@kepello/nodegraph-analysis@^3.5.0`) consumes this to classify the role agnostically. 1 new integration test. 111 tests pass.
+
 ## [0.27.0] — 2026-06-01
 
 Two L0-.NET residual fixes (Fathom rows 5.0.68.3 + 5.0.68.2.1).
