@@ -1826,6 +1826,28 @@ static (string Kind, Dictionary<string, object?>? Trigger, Dictionary<string, ob
         }
     }
 
+    // E1 — event-handler: a method matching the .NET event-callback convention
+    // `(object sender, TEventArgs e)` — exactly two params, the first `object`
+    // (or `object?`), the second a type whose simple name ends in `EventArgs`
+    // (WinForms / WebForms / WPF / `EventHandler<T>`). The framework invokes it
+    // on an event, so it is an entry point (the deferred E1 `event-handler`
+    // kind). The L1 `methodStereotype` derivation consumes this entryPoint to
+    // classify the method's role — keeping the framework-specific shape
+    // detection in the analyzer and the stereotype derivation language-agnostic
+    // (Fathom L1-.NET fix #2). Methods named `Main` and HTTP-attributed methods
+    // are already classified above.
+    if (node is MethodDeclarationSyntax ehMethod && ehMethod.ParameterList.Parameters.Count == 2)
+    {
+        var p0 = ehMethod.ParameterList.Parameters[0].Type?.ToString();
+        var p1 = ehMethod.ParameterList.Parameters[1].Type?.ToString();
+        if ((p0 == "object" || p0 == "object?")
+            && p1 != null
+            && p1.Split('<')[0].Split('.').Last().EndsWith("EventArgs", System.StringComparison.Ordinal))
+        {
+            return ("event-handler", null, null, null);
+        }
+    }
+
     // E1 — http-controller: class whose name ends in `Controller`. Per
     // row 4.4.2.1 — promoted out of the E3 catalogue based on PNE/PNP
     // triage (688 unambiguous cases). Fires whether the class is public

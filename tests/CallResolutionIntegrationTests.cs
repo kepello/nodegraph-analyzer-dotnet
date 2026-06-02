@@ -193,6 +193,33 @@ public class CameraPropertyValue {
     }
 
     [Fact]
+    public void EntryPoint_EventHandlerSignature_IsEventHandler()
+    {
+        // A method matching the .NET event-callback convention
+        // `(object sender, TEventArgs e)` is framework-invoked → entryPoint
+        // event-handler (L1-.NET fix #2; the L1 derivation maps this to the
+        // event-handler stereotype). Includes derived-EventArgs; excludes
+        // non-handler signatures.
+        var dir = MakeTempTree(("Form1.cs", @"
+using System;
+public class Form1 {
+    private void button_Click(object sender, EventArgs e) { }
+    private void grid_SelectionChanged(object sender, MySelectionEventArgs e) { }
+    public void NotAHandler(int x, string y) { }
+}
+public class MySelectionEventArgs : EventArgs { }"));
+        try
+        {
+            var ep = AnalyzeEntryPoints(dir, "Form1.cs");
+            Assert.Equal("event-handler", ep.GetValueOrDefault("form1/button_click-object-eventargs"));
+            Assert.Equal("event-handler", ep.GetValueOrDefault("form1/grid_selectionchanged-object-myselectioneventargs"));
+            // Non-handler signature is NOT an event-handler.
+            Assert.NotEqual("event-handler", ep.GetValueOrDefault("form1/notahandler-int-string"));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
     public void EntryPoint_PublicMethodOnPublicType_IsLibraryExportMethod()
     {
         // L0-.NET Gate 3: a public method on a public top-level type is
