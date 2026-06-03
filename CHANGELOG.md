@@ -2,6 +2,14 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.30.0] — 2026-06-02
+
+L1 stereotype-precision overhaul — **Stage 5 (class-side), L0 portion** (Fathom row `l1a-stereotype-derivation-precise` 3.1.1.1).
+
+### Added
+
+- **`baseTypes` facet (F7)** — emits the simple names of a type's base list (base class + interfaces) on container elements, **including external/framework bases** that the `extends`/`implements` edges drop because they resolve to no workspace node (WinForms `Form`, WebForms `Page`/`UserControl`, WPF `Window`, …). A base type is a fact (a name), not a relationship to a node we have, so it's a metadata facet, not a dangling edge — consistent with the no-silent-degradation/no-dangling-edge stance. Auto-flattened to `metadata.baseTypes` at ingest. The L1 `classStereotype` rule reads it to tag boundary/`interfacer` classes by base type, which name heuristics miss (functionally-named pages). Verified on Utilities: 30 classes with `baseTypes` — 14 `Form`, 1 `UserControl`, plus `ApplicationSettingsBase`/`EventArgs`/interfaces. No new test fixtures (the facet is exercised by the analysis-side `interfacer` tests + the cross-corpus measurement).
+
 ## [0.29.0] — 2026-06-02
 
 L1 stereotype-precision overhaul — **Stage 2 (.NET analyzer)** (Fathom row `l1a-stereotype-derivation-precise` 3.1.1.1). Emits the two new F6 return-shape facts (`accessesField.subtype` was already emitted, 0.25.0). The L1 derivation rules consume these at Stage 4.

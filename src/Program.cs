@@ -750,6 +750,24 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
         if (returnKindFacet != null) element["returnKind"] = returnKindFacet;
         if (returnsFieldFacet != null) element["returnsField"] = returnsFieldFacet;
 
+        // F7 — base-type names (Fathom 3.1.1.1 S5). The simple names of a
+        // type's base list (base class + interfaces), INCLUDING external /
+        // framework bases that the `extends`/`implements` EDGES drop because
+        // they resolve to no workspace node (e.g. WinForms `Form`, WebForms
+        // `Page`/`UserControl`). A base type is a fact (a name), not a
+        // relationship to a node we have — so it's a metadata facet, not a
+        // dangling edge. The L1 `classStereotype` rule reads this to tag
+        // boundary / `interfacer` classes by base type (name heuristics miss
+        // functionally-named pages). Emitted for container kinds only.
+        if (node is TypeDeclarationSyntax typeForBase && typeForBase.BaseList != null)
+        {
+            var baseTypes = typeForBase.BaseList.Types
+                .Select(b => b.Type.ToString().Split('<')[0].Split('.').Last())
+                .Where(n => !string.IsNullOrEmpty(n))
+                .ToArray();
+            if (baseTypes.Length > 0) element["baseTypes"] = baseTypes;
+        }
+
         // Language-conformance Group G — canonical documentation.
         // G1 `documentation` carries parsed XML-doc tag content; G2
         // `documentationCoverage` is true iff G1 was emitted.
