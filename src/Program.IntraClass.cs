@@ -81,53 +81,74 @@ static class IntraClassHelpers
         List<AmbiguousCall> AmbiguousCalls);
 
     /// <summary>
-    /// Build the member index for a type declaration. Includes fields,
+    /// Build the member index for a single type declaration. Includes fields,
     /// properties (treated as fields for the cohesion graph since they
-    /// hold state), methods, and accessors.
+    /// hold state), methods, and accessors. Convenience wrapper over the
+    /// partial-aware <see cref="BuildIndex(IEnumerable{TypeDeclarationSyntax})"/>;
+    /// callers that have the type's full set of partial declarations should use
+    /// the union overload (Fathom row dotnet-l0-partial-class-field-index).
     /// </summary>
     public static ClassMemberIndex BuildIndex(TypeDeclarationSyntax typeDecl)
+        => BuildIndex(new[] { typeDecl });
+
+    /// <summary>
+    /// Build the member index unioned across ALL partial declarations of a
+    /// type. A C# type may be split across files (the canonical WinForms case:
+    /// controls live in <c>Form.Designer.cs</c>, handlers in <c>Form.cs</c>);
+    /// indexing only the declaration in the file being walked made the other
+    /// partials' fields/methods invisible, so <c>accessesField</c> /
+    /// <c>callsMethod</c> edges + the <c>returnsField</c> fact to those members
+    /// were silently dropped (Fathom row dotnet-l0-partial-class-field-index).
+    /// The caller passes every partial declaration of the type (resolved via
+    /// the type symbol's <c>DeclaringSyntaxReferences</c> over the shared
+    /// multi-file compilation).
+    /// </summary>
+    public static ClassMemberIndex BuildIndex(IEnumerable<TypeDeclarationSyntax> decls)
     {
         var fields = new HashSet<string>();
         var methods = new HashSet<string>();
         var overloads = new Dictionary<string, List<MethodOverload>>();
 
-        foreach (var member in typeDecl.Members)
+        foreach (var typeDecl in decls)
         {
-            switch (member)
+            foreach (var member in typeDecl.Members)
             {
-                case FieldDeclarationSyntax fd:
-                    foreach (var v in fd.Declaration.Variables)
-                    {
-                        fields.Add(v.Identifier.Text);
-                    }
-                    break;
-                case PropertyDeclarationSyntax pd:
-                    fields.Add(pd.Identifier.Text);
-                    break;
-                case EventFieldDeclarationSyntax ed:
-                    foreach (var v in ed.Declaration.Variables)
-                    {
-                        fields.Add(v.Identifier.Text);
-                    }
-                    break;
-                case EventDeclarationSyntax ed2:
-                    fields.Add(ed2.Identifier.Text);
-                    break;
-                case MethodDeclarationSyntax md:
-                    methods.Add(md.Identifier.Text);
-                    if (!overloads.TryGetValue(md.Identifier.Text, out var list))
-                    {
-                        list = new List<MethodOverload>();
-                        overloads[md.Identifier.Text] = list;
-                    }
-                    list.Add(new MethodOverload(
-                        md.ParameterList.Parameters.Count,
-                        NamingHelpers.GetParamSignature(md)));
-                    break;
-                case ConstructorDeclarationSyntax:
-                case DestructorDeclarationSyntax:
-                    // Not referenced by name from inside the type.
-                    break;
+                switch (member)
+                {
+                    case FieldDeclarationSyntax fd:
+                        foreach (var v in fd.Declaration.Variables)
+                        {
+                            fields.Add(v.Identifier.Text);
+                        }
+                        break;
+                    case PropertyDeclarationSyntax pd:
+                        fields.Add(pd.Identifier.Text);
+                        break;
+                    case EventFieldDeclarationSyntax ed:
+                        foreach (var v in ed.Declaration.Variables)
+                        {
+                            fields.Add(v.Identifier.Text);
+                        }
+                        break;
+                    case EventDeclarationSyntax ed2:
+                        fields.Add(ed2.Identifier.Text);
+                        break;
+                    case MethodDeclarationSyntax md:
+                        methods.Add(md.Identifier.Text);
+                        if (!overloads.TryGetValue(md.Identifier.Text, out var list))
+                        {
+                            list = new List<MethodOverload>();
+                            overloads[md.Identifier.Text] = list;
+                        }
+                        list.Add(new MethodOverload(
+                            md.ParameterList.Parameters.Count,
+                            NamingHelpers.GetParamSignature(md)));
+                        break;
+                    case ConstructorDeclarationSyntax:
+                    case DestructorDeclarationSyntax:
+                        // Not referenced by name from inside the type.
+                        break;
+                }
             }
         }
 

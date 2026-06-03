@@ -2,6 +2,18 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.31.0] — 2026-06-03
+
+Fixes a systemic intra-class-edge gap surfaced while auditing the L1 unclassified residual (Fathom row `dotnet-l0-partial-class-field-index`).
+
+### Fixed
+
+- **Partial-class member index now unions ALL declarations of a type.** `IntraClassHelpers.BuildIndex` was built from the single `TypeDeclarationSyntax` in the file being walked, so members declared in a *different* partial file were invisible to the index. The canonical case is WinForms/WebForms: controls live in `Form.Designer.cs`, handlers/logic in `Form.cs`. Consequences were silent and broad — for **every type split across files**:
+  - `accessesField` read/write edges to the other-partial fields were never emitted → **LCOM4 cohesion + field-coupling were silently too optimistic**, and field-writing methods misclassified (the L1 `mutator` stereotype collapsed into `command`).
+  - the `returnsField` fact (fed by the same index) missed getters returning an other-partial field → the L1 `accessor` stereotype under-fired.
+  - same-class `callsMethod` to other-partial methods was missed → `collaborator-internal` under-fired.
+  The fix resolves the type symbol (`semanticModel.GetDeclaredSymbol`) and unions the index across all its `DeclaringSyntaxReferences` over the shared multi-file compilation; falls back to the single declaration when the symbol can't be resolved. New `BuildIndex(IEnumerable<TypeDeclarationSyntax>)` overload; the single-decl overload delegates to it. **Measured impact** (clean re-analyze): Utilities `mutator 0→59` (recovered from `command`), `collaborator-internal 1→9`; MyPatientNow `mutator 0→1817`, `command 2823→1027` — ~1900 methods across the two corpora were misclassified because their writes to controls/partial fields were invisible. 2 integration tests (`PartialClassMemberIndexTests`: cross-file `accessesField` + `returnsField`); 119 tests pass.
+
 ## [0.30.0] — 2026-06-02
 
 L1 stereotype-precision overhaul — **Stage 5 (class-side), L0 portion** (Fathom row `l1a-stereotype-derivation-precise` 3.1.1.1).

@@ -491,7 +491,21 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
             var containingType = node.Ancestors().OfType<TypeDeclarationSyntax>().FirstOrDefault();
             if (containingType != null)
             {
-                var memberIndex = IntraClassHelpers.BuildIndex(containingType);
+                // Union the member index across ALL partial declarations of the
+                // type, not just the one in this file. The type symbol's
+                // DeclaringSyntaxReferences span the shared multi-file
+                // compilation, so a field declared in `Form.Designer.cs` is
+                // visible when walking a handler in `Form.cs` (Fathom row
+                // dotnet-l0-partial-class-field-index). Falls back to the single
+                // declaration when the symbol can't be resolved.
+                var typeSymbol = semanticModel.GetDeclaredSymbol(containingType);
+                var typeDecls = typeSymbol?.DeclaringSyntaxReferences
+                    .Select(r => r.GetSyntax())
+                    .OfType<TypeDeclarationSyntax>()
+                    .ToList();
+                var memberIndex = typeDecls is { Count: > 0 }
+                    ? IntraClassHelpers.BuildIndex(typeDecls)
+                    : IntraClassHelpers.BuildIndex(containingType);
                 // F6 return-shape (reuses the member-field index for the
                 // returnsField `return _x;` / `return this.X;` detection).
                 (returnKindFacet, returnsFieldFacet) =
