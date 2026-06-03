@@ -39,7 +39,8 @@ public class PartialClassMemberIndexTests
     private sealed record ElementInfo(
         string Name,
         List<(string Type, string? Subtype, string Target)> Edges,
-        bool? ReturnsField);
+        bool? ReturnsField,
+        bool? IsStatic);
 
     private static Dictionary<string, ElementInfo> Analyze(string dir, string fileSuffix)
     {
@@ -92,7 +93,10 @@ public class PartialClassMemberIndexTests
                     bool? returnsField = el.TryGetProperty("returnsField", out var rf) && rf.ValueKind == JsonValueKind.True ? true
                         : el.TryGetProperty("returnsField", out var rf2) && rf2.ValueKind == JsonValueKind.False ? false
                         : (bool?)null;
-                    map[name] = new ElementInfo(name, edges, returnsField);
+                    bool? isStatic = el.TryGetProperty("isStatic", out var isr) && isr.ValueKind == JsonValueKind.True ? true
+                        : el.TryGetProperty("isStatic", out var isr2) && isr2.ValueKind == JsonValueKind.False ? false
+                        : (bool?)null;
+                    map[name] = new ElementInfo(name, edges, returnsField, isStatic);
                 }
             }
         }
@@ -163,6 +167,34 @@ namespace App {
             var elems = Analyze(dir, "Holder.cs");
             Assert.True(elems.ContainsKey("holder/name/get"), "getter accessor emitted");
             Assert.Equal(true, elems["holder/name/get"].ReturnsField);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void IsStatic_Facet_TracksTheStaticModifier()
+    {
+        // The `isStatic` facet (Fathom 3.1.1.1.3 G1) must reflect the `static`
+        // modifier — NOT static dispatch (a plain instance method is
+        // statically dispatched but is NOT static). Feeds the L1 static-utility
+        // helper-module rule. Covers a `static class`'s implicitly-required
+        // static members + a non-static class's static vs instance methods.
+        var dir = MakeTempTree(("Mix.cs", @"
+namespace App {
+    public static class Utilrs {
+        public static int Helper() { return 1; }
+    }
+    public class Box {
+        public static int StaticOp() { return 2; }
+        public int InstanceOp() { return 3; }
+    }
+}"));
+        try
+        {
+            var elems = Analyze(dir, "Mix.cs");
+            Assert.Equal(true, elems["utilrs/helper"].IsStatic);
+            Assert.Equal(true, elems["box/staticop"].IsStatic);
+            Assert.Equal(false, elems["box/instanceop"].IsStatic);
         }
         finally { Directory.Delete(dir, true); }
     }

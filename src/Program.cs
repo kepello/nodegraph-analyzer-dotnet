@@ -764,6 +764,23 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
         if (returnKindFacet != null) element["returnKind"] = returnKindFacet;
         if (returnsFieldFacet != null) element["returnsField"] = returnsFieldFacet;
 
+        // isStatic — the `static` modifier is present. Distinct from
+        // `dispatchKind == "static"`, which also tags instance methods that are
+        // merely statically dispatched (no virtual/override). The L1
+        // `classStereotype` rule reads this to detect static-utility containers
+        // (a class whose methods are all static = a `helper-module`), which the
+        // name-suffix helper rule misses (`Utils` / `Common` / `Extensions`).
+        // Fathom row l1-unclassified-residual-refinement 3.1.1.1.3 (G1).
+        if (declarable?.flavors is { } flavorsForStatic
+            && flavorsForStatic.TryGetValue("static", out var staticVal) && staticVal is true)
+        {
+            element["isStatic"] = true;
+        }
+        else
+        {
+            element["isStatic"] = false;
+        }
+
         // F7 — base-type names (Fathom 3.1.1.1 S5). The simple names of a
         // type's base list (base class + interfaces), INCLUDING external /
         // framework bases that the `extends`/`implements` EDGES drop because

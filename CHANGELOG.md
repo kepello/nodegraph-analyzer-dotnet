@@ -2,6 +2,14 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.32.0] — 2026-06-03
+
+L1 unclassified-residual burn-down — L0 portion (Fathom row `l1-unclassified-residual-refinement` 3.1.1.1.3, G1).
+
+### Added
+
+- **`isStatic` facet** — emits whether an element carries the `static` modifier (a static method/member, or a `static class`). Sourced from the already-parsed `flavors["static"]`. Distinct from `dispatchKind == "static"`, which also tags plain instance methods that are merely statically dispatched (no virtual/override) — so `dispatchKind` could not be reused. Auto-flattened to `metadata.isStatic` at ingest. The L1 `classStereotype` rule reads it to detect static-utility containers (a class whose behavioural members are all static = a `helper-module`) that the `*Helper(s)` name-suffix rule misses (`Utils`, `Common`, a `static class Extensions`). 1 integration test (`isStatic` tracks the modifier across a static class + a non-static class's static vs instance methods); 120 tests pass.
+
 ## [0.31.0] — 2026-06-03
 
 Fixes a systemic intra-class-edge gap surfaced while auditing the L1 unclassified residual (Fathom row `dotnet-l0-partial-class-field-index`).
