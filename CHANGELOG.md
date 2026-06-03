@@ -2,6 +2,14 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.33.0] — 2026-06-03
+
+L1 `interfacer` transitive boundary-base detection (Fathom row `l1-interfacer-transitive-base` 3.1.1.1.4 / G5). Surfaced by the EnvisionWeb re-measure.
+
+### Changed
+
+- **`baseTypes` now includes TRANSITIVE base-class ancestors, not just the direct base list.** A boundary class is often reached through a project intermediate base (the EnvisionWeb WebForms shape: `ModalWaitingListEdit : AuthenticatedModalBase : … : UserControl`, ×112 such classes). The direct base list named only `AuthenticatedModalBase` — not in the L1 boundary catalogue — so the `interfacer` rule missed it and the class fell to `unclassified`/mis-stereotyped. The facet now walks the type symbol's `BaseType` chain (stopping at `System.Object`, cycle-guarded) and appends each ancestor's simple name, so the framework terminal (`UserControl`/`Page`/`Form`) is present and the unchanged engine `interfacer` rule matches it. Robust across compilation modes: an unresolved external base (references-free fallback) resolves to an error symbol that still carries the simple name, so the terminal is captured either way. Direct-base + interface behaviour preserved (deduped). 2 new tests (in-source transitive chain; framework terminal through an in-source intermediate); 122 pass.
+
 ## [0.32.0] — 2026-06-03
 
 L1 unclassified-residual burn-down — L0 portion (Fathom row `l1-unclassified-residual-refinement` 3.1.1.1.3, G1).

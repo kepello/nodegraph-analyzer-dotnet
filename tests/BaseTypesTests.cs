@@ -92,4 +92,46 @@ public class Plain {}"));
         }
         finally { Directory.Delete(dir, true); }
     }
+
+    [Fact]
+    public void BaseTypes_IncludesTransitiveInSourceAncestors()
+    {
+        // C : B : A — all in-source. The TRANSITIVE walk (Fathom 3.1.1.1.4 / G5)
+        // surfaces B (direct) AND A (transitive ancestor), so a boundary base
+        // reached through a project intermediate is visible to the L1 rule.
+        var dir = MakeTempTree(("Chain.cs", @"
+public class A {}
+public class B : A {}
+public class C : B {}"));
+        try
+        {
+            var bt = AnalyzeBaseTypes(dir, "Chain.cs");
+            var c = bt.First(kv => kv.Key.EndsWith("/c") || kv.Key == "c");
+            Assert.Contains("B", c.Value);   // direct
+            Assert.Contains("A", c.Value);   // transitive
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void BaseTypes_ReachesFrameworkTerminal_ThroughInSourceIntermediate()
+    {
+        // The EnvisionWeb G5 shape: a code-behind extends a PROJECT base that
+        // (transitively) derives from a framework boundary. The direct base
+        // (`ModalBase`) isn't in the L1 catalogue; the framework terminal
+        // (`Form`/`UserControl`) is. The walk must surface that terminal name
+        // even when the framework type isn't referenced (it resolves to an
+        // error symbol that still carries the simple name).
+        var dir = MakeTempTree(("Modal.cs", @"
+public class ModalBase : System.Windows.Forms.Form {}
+public class ModalWaitingListEdit : ModalBase {}"));
+        try
+        {
+            var bt = AnalyzeBaseTypes(dir, "Modal.cs");
+            var modal = bt.First(kv => kv.Key.EndsWith("modalwaitinglistedit"));
+            Assert.Contains("ModalBase", modal.Value);  // direct (project intermediate)
+            Assert.Contains("Form", modal.Value);       // transitive framework terminal → interfacer
+        }
+        finally { Directory.Delete(dir, true); }
+    }
 }

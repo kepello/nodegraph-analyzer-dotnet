@@ -790,12 +790,40 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
         // dangling edge. The L1 `classStereotype` rule reads this to tag
         // boundary / `interfacer` classes by base type (name heuristics miss
         // functionally-named pages). Emitted for container kinds only.
-        if (node is TypeDeclarationSyntax typeForBase && typeForBase.BaseList != null)
+        if (node is TypeDeclarationSyntax typeForBase)
         {
-            var baseTypes = typeForBase.BaseList.Types
-                .Select(b => b.Type.ToString().Split('<')[0].Split('.').Last())
-                .Where(n => !string.IsNullOrEmpty(n))
-                .ToArray();
+            // Direct base list (base class + interfaces), syntactic — preserves
+            // the original behaviour and handles generics (`ClientBase<T>` →
+            // `ClientBase`). Order-preserving with the transitive walk appended.
+            var baseNames = new List<string>();
+            if (typeForBase.BaseList != null)
+            {
+                baseNames.AddRange(typeForBase.BaseList.Types
+                    .Select(b => b.Type.ToString().Split('<')[0].Split('.').Last())
+                    .Where(n => !string.IsNullOrEmpty(n)));
+            }
+            // TRANSITIVE base-class ancestors (Fathom row l1-interfacer-transitive-
+            // base 3.1.1.1.4 / G5). A class is a boundary `interfacer` even when
+            // its framework base is reached through a PROJECT intermediate base
+            // (`ModalFoo : AuthenticatedModalBase : UserControl`). The direct base
+            // list only names `AuthenticatedModalBase`, which isn't in the L1
+            // boundary catalogue. Walk the symbol's base-class chain so the
+            // framework ancestor's simple name (`UserControl`) is present and the
+            // unchanged `interfacer` rule matches it. Best-effort: when the
+            // symbol / a link in the chain doesn't resolve (e.g. the references-
+            // free sharedCompilation fallback for orphan files), the walk simply
+            // stops — the direct names above still carry the no-intermediate case.
+            if (semanticModel.GetDeclaredSymbol(typeForBase) is INamedTypeSymbol typeSym)
+            {
+                var seen = new HashSet<string>();
+                for (var b = typeSym.BaseType;
+                     b != null && b.SpecialType != SpecialType.System_Object && seen.Add(b.Name);
+                     b = b.BaseType)
+                {
+                    if (!string.IsNullOrEmpty(b.Name)) baseNames.Add(b.Name);
+                }
+            }
+            var baseTypes = baseNames.Distinct().ToArray();
             if (baseTypes.Length > 0) element["baseTypes"] = baseTypes;
         }
 
