@@ -16,6 +16,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Collections.Immutable;
+using System.Collections.Concurrent;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -140,6 +141,10 @@ static void RunOutput(AnalyzerArgs args, AnalyzerConfig config, bool msbuildAvai
     // Per-file iteration. Project-map hit uses the MSBuildWorkspace
     // compilation; orphan files use the sharedCompilation fallback.
     // Parallel ordering preserved; Console.WriteLine is atomic per call in .NET.
+    // Fathom row dotnet-references-free-analysis-loud (5.0.72): track which
+    // files fall to the references-free `sharedCompilation` so the run can
+    // emit ONE proportional summary problem (below) — no-silent-degradation.
+    var referencesFreeFiles = new ConcurrentBag<string>();
     Parallel.ForEach(syntaxTrees, tree =>
     {
         var filePath = tree.FilePath;
@@ -148,17 +153,21 @@ static void RunOutput(AnalyzerArgs args, AnalyzerConfig config, bool msbuildAvai
             if (!fileContents.TryGetValue(filePath, out var content)) return;
             Compilation compilationForFile;
             SyntaxTree treeForFile;
+            bool referencesFree;
             if (projectMap.TryGetValue(filePath, out var projectEntry))
             {
                 compilationForFile = projectEntry.Compilation;
                 treeForFile = projectEntry.SyntaxTree;
+                referencesFree = false;
             }
             else
             {
                 compilationForFile = sharedCompilation;
                 treeForFile = tree;
+                referencesFree = true;
+                referencesFreeFiles.Add(filePath);
             }
-            var artifact = BuildArtifact(content, filePath, config.IncludeComments, compilationForFile, treeForFile, CanonicalizeFilePath);
+            var artifact = BuildArtifact(content, filePath, config.IncludeComments, compilationForFile, treeForFile, CanonicalizeFilePath, referencesFree);
             if (artifact == null) return;
             Emit(new { type = "artifact", artifact });
             Interlocked.Increment(ref elementsEmitted);
@@ -168,6 +177,19 @@ static void RunOutput(AnalyzerArgs args, AnalyzerConfig config, bool msbuildAvai
             Emit(new { type = "error", message = $"Failed to process: {ex.Message}", filePath });
         }
     });
+
+    // Fathom row dotnet-references-free-analysis-loud (5.0.72): one proportional
+    // summary problem when any file analyzed references-free. error when the
+    // analysis is WHOLLY references-free (MSBuild absent / 0 projects loaded),
+    // warning otherwise (naming the largest references-free tiers). The
+    // per-file Limitations (above) carry the same signal per element.
+    var refFreeSummary = ReferencesFreeReporting.BuildSummaryProblem(
+        csFiles.Count, referencesFreeFiles.Count, projectMap.Count, msbuildAvailable, referencesFreeFiles, args.Path);
+    if (refFreeSummary != null)
+    {
+        Emit(new { type = "problem", problem = refFreeSummary });
+        Console.Error.WriteLine($".NET analyzer: {refFreeSummary["severity"]} — {refFreeSummary["message"]}");
+    }
 
     // Structural emission for project + solution files. XML / text
     // parsing is cheap; sequential is fine and avoids any concern about
@@ -220,10 +242,11 @@ static object? BuildArtifact(
     bool includeComments,
     Compilation sharedCompilation,
     SyntaxTree sharedTree,
-    Func<string, string> canonicalizeFilePath)
+    Func<string, string> canonicalizeFilePath,
+    bool referencesFree = false)
 {
     var (elements, artifactEdges, problems, limitations) = DecomposeWithRoslyn(
-        content, filePath, includeComments, sharedCompilation, sharedTree, canonicalizeFilePath);
+        content, filePath, includeComments, sharedCompilation, sharedTree, canonicalizeFilePath, referencesFree);
 
     var artifact = new Dictionary<string, object?>
     {
@@ -289,7 +312,8 @@ static string? ExtractFileLeadingComment(string content)
 static (object[] elements, object[] artifactEdges, object[] problems, object[] limitations) DecomposeWithRoslyn(
     string content, string filePath, bool includeComments,
     Compilation sharedCompilation, SyntaxTree tree,
-    Func<string, string> canonicalizeFilePath)
+    Func<string, string> canonicalizeFilePath,
+    bool referencesFree = false)
 {
     var root = tree.GetRoot();
 
@@ -305,6 +329,13 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
     // Group J — limitations accumulator (filled by E3 heuristics + future
     // fallback-emission sites per P2 fallback-emits-limitation rule).
     var limitationsAccumulator = new List<object>();
+
+    // Fathom row dotnet-references-free-analysis-loud (5.0.72): this file was
+    // analyzed without project references (orphan / Web Site Project / failed
+    // csproj). Record it per-element so the degradation of external-symbol
+    // facts (base types, external calls, overrides) is observable downstream.
+    if (referencesFree)
+        limitationsAccumulator.Add(ReferencesFreeReporting.BuildLimitation(filePath));
 
     var compilationUnit = (CompilationUnitSyntax)root;
     foreach (var usingDirective in compilationUnit.Usings)

@@ -2,6 +2,19 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.34.0] — 2026-06-04
+
+References-free analysis is now **loud** (Fathom row `dotnet-references-free-analysis-loud` 5.0.72). A `.cs` file not owned by any loaded `.csproj` falls to the System-runtime-only `sharedCompilation` — orphan files, an ASP.NET **Web Site Project** (no project file by design), a `.csproj` that failed to load, or a host without MSBuild — which silently degrades every external-symbol fact (framework base types → `interfacer`, external call resolution, overrides). That degradation was invisible (project-*load* failures emit problems; a per-file fallback emitted nothing). Surfaced chasing the L1 residuals: **~53% of EnvisionWeb (the 983-file `EnvisionAnywhere.com` Web Site Project) analyzes references-free, silently** — so every EnvisionWeb L1 number measured to date is partly computed on degraded data.
+
+### Added
+
+- **`ReferencesFreeReporting`** (`Program.ReferencesFree.cs`): per-file Group-J `Limitation` (`csharp-references-free-compilation`, `significant`) on every element of a references-free file, so downstream can filter/flag rather than trust silently; plus one proportional run-level summary `problem` — **`error`** when the analysis is wholly references-free (MSBuild unavailable / 0 projects loaded), **`warning`** otherwise, naming the largest references-free tiers (e.g. an entire Web Site Project) so the operator sees *which* tier is blind.
+- This also makes the analyzer a **diagnostic** for true resolution state: a re-measure now reports, per file, which tier actually resolved (incl. whether old-style .NET Framework csproj resolve their refs on a non-Windows host).
+
+### Tests
+
+- `ReferencesFreeReportingTests` (5): limitation shape; summary null when none; partial → warning naming the tier; 0-projects → error; MSBuild-unavailable → error. End-to-end smoke on the `dotnet-msbuild` fixture: `Orphan.cs` (1 of 4) emits the warning + the per-file limitation while the 2 restored projects resolve. 127 tests pass.
+
 ## [0.33.0] — 2026-06-03
 
 L1 `interfacer` transitive boundary-base detection (Fathom row `l1-interfacer-transitive-base` 3.1.1.1.4 / G5). Surfaced by the EnvisionWeb re-measure.

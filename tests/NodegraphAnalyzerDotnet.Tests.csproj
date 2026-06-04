@@ -30,6 +30,7 @@
     <Compile Include="../src/Program.MSBuildIntegration.cs" Link="Program.MSBuildIntegration.cs" />
     <Compile Include="../src/Program.IntraClass.cs" Link="Program.IntraClass.cs" />
     <Compile Include="../src/Program.Naming.cs" Link="Program.Naming.cs" />
+    <Compile Include="../src/Program.ReferencesFree.cs" Link="Program.ReferencesFree.cs" />
   </ItemGroup>
 
 </Project>
