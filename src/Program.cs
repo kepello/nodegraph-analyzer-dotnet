@@ -865,39 +865,52 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
         // functionally-named pages). Emitted for container kinds only.
         if (node is TypeDeclarationSyntax typeForBase)
         {
-            // Direct base list (base class + interfaces), syntactic — preserves
-            // the original behaviour and handles generics (`ClientBase<T>` →
-            // `ClientBase`). Order-preserving with the transitive walk appended.
+            // F7 baseTypes — Fathom row dotnet-basetypes-fqn-interfacer-precision
+            // (3.1.1.1.7 / "C"). Emit FULLY-QUALIFIED base names (transitive
+            // base-class chain + implemented interfaces) so the L1 `interfacer`
+            // rule matches unambiguously: a domain `Report`/`Page` no longer
+            // collides with `Telerik.Reporting.Report` / `System.Web.UI.Page`.
+            // FQNs require resolution (B's Web Site Project support + csproj
+            // load supply it); an UNRESOLVED base (error symbol, references-free)
+            // yields only its simple name, which intentionally does NOT match
+            // the FQN catalogue — NO simple-name fallback (it obscures the loss),
+            // and the references-free Limitation (5.0.72) already flags such
+            // elements. Replaces the prior `.Split('.').Last()` simple-name
+            // emission (which made every catalogue entry latently ambiguous).
+            var fqFormat = SymbolDisplayFormat.FullyQualifiedFormat
+                .WithGlobalNamespaceStyle(SymbolDisplayGlobalNamespaceStyle.Omitted)
+                // Strip type arguments so a generic boundary base matches the
+                // catalogue by name: `ClientBase<TChannel>` → `System.ServiceModel.ClientBase`.
+                .WithGenericsOptions(SymbolDisplayGenericsOptions.None);
             var baseNames = new List<string>();
-            if (typeForBase.BaseList != null)
-            {
-                baseNames.AddRange(typeForBase.BaseList.Types
-                    .Select(b => b.Type.ToString().Split('<')[0].Split('.').Last())
-                    .Where(n => !string.IsNullOrEmpty(n)));
-            }
-            // TRANSITIVE base-class ancestors (Fathom row l1-interfacer-transitive-
-            // base 3.1.1.1.4 / G5). A class is a boundary `interfacer` even when
-            // its framework base is reached through a PROJECT intermediate base
-            // (`ModalFoo : AuthenticatedModalBase : UserControl`). The direct base
-            // list only names `AuthenticatedModalBase`, which isn't in the L1
-            // boundary catalogue. Walk the symbol's base-class chain so the
-            // framework ancestor's simple name (`UserControl`) is present and the
-            // unchanged `interfacer` rule matches it. Best-effort: when the
-            // symbol / a link in the chain doesn't resolve (e.g. the references-
-            // free sharedCompilation fallback for orphan files), the walk simply
-            // stops — the direct names above still carry the no-intermediate case.
+            var seen = new HashSet<string>();
             if (semanticModel.GetDeclaredSymbol(typeForBase) is INamedTypeSymbol typeSym)
             {
-                var seen = new HashSet<string>();
                 for (var b = typeSym.BaseType;
-                     b != null && b.SpecialType != SpecialType.System_Object && seen.Add(b.Name);
+                     b != null && b.SpecialType != SpecialType.System_Object;
                      b = b.BaseType)
                 {
-                    if (!string.IsNullOrEmpty(b.Name)) baseNames.Add(b.Name);
+                    var fq = b.ToDisplayString(fqFormat);
+                    if (!string.IsNullOrEmpty(fq) && seen.Add(fq)) baseNames.Add(fq);
+                }
+                foreach (var iface in typeSym.Interfaces)
+                {
+                    var fq = iface.ToDisplayString(fqFormat);
+                    if (!string.IsNullOrEmpty(fq) && seen.Add(fq)) baseNames.Add(fq);
                 }
             }
-            var baseTypes = baseNames.Distinct().ToArray();
-            if (baseTypes.Length > 0) element["baseTypes"] = baseTypes;
+            else if (typeForBase.BaseList != null)
+            {
+                // Declaration symbol didn't resolve — keep the syntactic names
+                // with whatever qualification the source wrote (generics
+                // stripped); no last-segment reduction.
+                foreach (var b in typeForBase.BaseList.Types)
+                {
+                    var n = b.Type.ToString().Split('<')[0].Trim();
+                    if (n.Length > 0 && seen.Add(n)) baseNames.Add(n);
+                }
+            }
+            if (baseNames.Count > 0) element["baseTypes"] = baseNames.ToArray();
         }
 
         // Language-conformance Group G — canonical documentation.

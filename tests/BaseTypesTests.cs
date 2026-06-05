@@ -4,11 +4,15 @@ using System.Text.Json;
 namespace NodegraphAnalyzerDotnet.Tests;
 
 /// <summary>
-/// F7 `baseTypes` facet (Fathom row l1a-stereotype-derivation-precise
-/// 3.1.1.1, Stage 5). The simple names of a type's base list, INCLUDING
-/// external/framework bases the `extends`/`implements` edges drop because
-/// they resolve to no workspace node — the signal the L1 `interfacer` rule
-/// needs for functionally-named boundary classes.
+/// F7 `baseTypes` facet (Fathom rows l1a-stereotype-derivation-precise 3.1.1.1
+/// Stage 5; FQN migration dotnet-basetypes-fqn-interfacer-precision 3.1.1.1.7).
+/// The FULLY-QUALIFIED names of a type's transitive base-class chain +
+/// implemented interfaces, INCLUDING external/framework bases the
+/// `extends`/`implements` edges drop because they resolve to no workspace node
+/// — the signal the L1 `interfacer` rule needs for functionally-named boundary
+/// classes. In-source types in the global namespace emit their simple name;
+/// namespaced/external types emit the FQN (so a domain `Page` never collides
+/// with `System.Web.UI.Page`).
 /// </summary>
 public class BaseTypesTests
 {
@@ -85,8 +89,10 @@ public class Plain {}"));
         {
             var bt = AnalyzeBaseTypes(dir, "OrderEntry.cs");
             var entry = bt.First(kv => kv.Key.EndsWith("orderentry"));
-            Assert.Contains("Form", entry.Value);          // external base, edge-dropped, facet-kept
-            Assert.Contains("IDisposable", entry.Value);
+            // FQN (3.1.1.1.7): even the unresolved external base keeps the
+            // source-written qualifier via the error symbol.
+            Assert.Contains("System.Windows.Forms.Form", entry.Value);
+            Assert.Contains("System.IDisposable", entry.Value);
             // A class with no base list emits no baseTypes facet.
             Assert.DoesNotContain(bt.Keys, k => k.EndsWith("plain"));
         }
@@ -129,8 +135,8 @@ public class ModalWaitingListEdit : ModalBase {}"));
         {
             var bt = AnalyzeBaseTypes(dir, "Modal.cs");
             var modal = bt.First(kv => kv.Key.EndsWith("modalwaitinglistedit"));
-            Assert.Contains("ModalBase", modal.Value);  // direct (project intermediate)
-            Assert.Contains("Form", modal.Value);       // transitive framework terminal → interfacer
+            Assert.Contains("ModalBase", modal.Value);                    // direct (project intermediate, global ns → simple)
+            Assert.Contains("System.Windows.Forms.Form", modal.Value);    // transitive framework terminal (FQN) → interfacer
         }
         finally { Directory.Delete(dir, true); }
     }

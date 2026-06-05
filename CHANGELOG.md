@@ -2,6 +2,10 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.36.0] — 2026-06-04
+
+`baseTypes` (F7) now emits **fully-qualified** names (Fathom row `dotnet-basetypes-fqn-interfacer-precision` 3.1.1.1.7). Fixes the namespace-discarding omission — direct base `…Split('.').Last()` + transitive `b.Name` — that forced the L1 `interfacer` rule to match ambiguous simple tokens (a domain `Page` collided with `System.Web.UI.Page`; `Report` with `Telerik.Reporting.Report`). Now the transitive base-class chain + implemented interfaces emit via `FullyQualifiedFormat` (global:: omitted, type-args stripped so `ClientBase<T>` → `System.ServiceModel.ClientBase`). In-source global-namespace types stay simple; namespaced/external types emit the FQN — including unresolved error symbols, which preserve the source-written qualifier (`System.Windows.Forms.Form` even when WinForms isn't referenced). **Atomic with the engine catalogue migration** (`@kepello/nodegraph-analysis@3.13.0`) — until the catalogue is FQN, interfacer wouldn't match, so the two ship together. 3 `baseTypes` tests updated to FQN; 144 pass.
+
 ## [0.35.0] — 2026-06-04
 
 ASP.NET **Web Site Project** support (Fathom row `dotnet-web-site-project-support` 5.0.73). WSPs have no `.csproj` by design (compiled by `aspnet_compiler`/the runtime), so Roslyn's MSBuildWorkspace can't load them and all their files fell to the references-free `sharedCompilation` (row 5.0.72 made that loud: ~55% of EnvisionWeb). Now the analyzer detects WSPs from the `.sln` and builds each a referenced `Compilation` from its DECLARED references, feeding them through the SAME `BuildArtifact`→`SemanticModel` path as csproj files — unified, no second-class path.
