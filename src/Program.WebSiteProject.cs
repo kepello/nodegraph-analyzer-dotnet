@@ -122,3 +122,30 @@ static class WebSiteProjectParser
     static string DecodeSlnValue(string v) =>
         v.Replace("%3D", "=").Replace("%3d", "=");
 }
+
+/// <summary>
+/// Parse the declared external assemblies from a Web Site Project's
+/// `web.config` (`<system.web><compilation><assemblies><add assembly="Name, …"/>`).
+/// Returns simple assembly names (the part before the first comma). The
+/// wildcard `<add assembly="*"/>` (= "everything in bin") is skipped — we
+/// resolve DECLARED references, never a blind bin manifest.
+/// </summary>
+static class WebConfigParser
+{
+    static readonly Regex AddAssembly = new(
+        "<add\\s+assembly\\s*=\\s*\"(?<a>[^\"]+)\"",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    public static IReadOnlyList<string> ParseAssemblyNames(string webConfigContent)
+    {
+        var names = new List<string>();
+        foreach (Match m in AddAssembly.Matches(webConfigContent))
+        {
+            var full = m.Groups["a"].Value.Trim();
+            if (full == "*") continue; // wildcard: not a declared assembly
+            var simple = full.Split(',')[0].Trim();
+            if (simple.Length > 0 && !names.Contains(simple)) names.Add(simple);
+        }
+        return names;
+    }
+}

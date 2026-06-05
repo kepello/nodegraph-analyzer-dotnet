@@ -84,3 +84,25 @@ EndProject
         Assert.Empty(none);
     }
 }
+
+public class WebConfigParserTests
+{
+    [Fact]
+    public void Extracts_declared_assembly_simple_names_and_skips_wildcard()
+    {
+        var webConfig = """
+<configuration><system.web><compilation debug="true" targetFramework="4.7.2">
+  <assemblies>
+    <add assembly="System.Core, Version=4.0.0.0, Culture=neutral, PublicKeyToken=B77A5C561934E089" />
+    <add assembly="Telerik.Reporting, Version=18.2.24.924, Culture=neutral, PublicKeyToken=a9d7983dfcc261be" />
+    <add assembly="*" />
+  </assemblies>
+</compilation></system.web></configuration>
+""";
+        var names = WebConfigParser.ParseAssemblyNames(webConfig);
+        Assert.Contains("System.Core", names);
+        Assert.Contains("Telerik.Reporting", names);
+        Assert.DoesNotContain("*", names);
+        Assert.Equal(2, names.Count);
+    }
+}

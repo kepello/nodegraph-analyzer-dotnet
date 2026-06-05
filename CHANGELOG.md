@@ -2,6 +2,22 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.35.0] — 2026-06-04
+
+ASP.NET **Web Site Project** support (Fathom row `dotnet-web-site-project-support` 5.0.73). WSPs have no `.csproj` by design (compiled by `aspnet_compiler`/the runtime), so Roslyn's MSBuildWorkspace can't load them and all their files fell to the references-free `sharedCompilation` (row 5.0.72 made that loud: ~55% of EnvisionWeb). Now the analyzer detects WSPs from the `.sln` and builds each a referenced `Compilation` from its DECLARED references, feeding them through the SAME `BuildArtifact`→`SemanticModel` path as csproj files — unified, no second-class path.
+
+### Added
+
+- **`WebSiteProjectParser`** (`Program.WebSiteProject.cs`) — `.sln` WSP entries (type GUID `{E24C65DC-…}` + `WebsiteProperties`) → name, physical path, `TargetFrameworkMoniker`, `ProjectReferences`.
+- **`FrameworkReferenceResolver`** (`Program.FrameworkReferences.cs`) — resolves each WSP's OWN TFM to its `Microsoft.NETFramework.ReferenceAssemblies.<tfm>` NuGet pack (the cross-platform mechanism; `ToolLocationHelper` returns empty on macOS — verified). No pack ⇒ observable `problem`, no borrowed-dir fallback.
+- **`WebConfigParser`** — declared 3rd-party assemblies from `web.config <compilation><assemblies>` (skips the `*` wildcard — declared refs only, never a blind bin manifest).
+- **`WebSiteProjectLoader`** (`Program.WebSiteProjectLoader.cs`) — assembles the WSP `Compilation`: framework pack (per-TFM) + `ProjectReferences` → the sibling project's already-built `Compilation` (`CompilationReference`, e.g. `CloudCore` — cross-tier symbols now resolve) + `web.config` assemblies located by name in `bin/`. Merged into the orchestrator's `projectMap`.
+
+### Validated
+
+- EnvisionWeb (~15s raw): **references-free 1017 → 20** (−997) — both WSPs (`EnvisionAnywhere.com` v4.7.2, `login.envisiongo.com` v4.8) resolved with their own per-TFM framework refs; no pack-missing problems, no fallback. The residual 20 are `.cs` in a csproj's dir but not its `<Compile>` set (a separate gap; still flagged loud by 5.0.72).
+- 17 new unit tests (WSP parse 6 + framework resolver 10 + web.config 1); 144 pass.
+
 ## [0.34.0] — 2026-06-04
 
 References-free analysis is now **loud** (Fathom row `dotnet-references-free-analysis-loud` 5.0.72). A `.cs` file not owned by any loaded `.csproj` falls to the System-runtime-only `sharedCompilation` — orphan files, an ASP.NET **Web Site Project** (no project file by design), a `.csproj` that failed to load, or a host without MSBuild — which silently degrades every external-symbol fact (framework base types → `interfacer`, external call resolution, overrides). That degradation was invisible (project-*load* failures emit problems; a per-file fallback emitted nothing). Surfaced chasing the L1 residuals: **~53% of EnvisionWeb (the 983-file `EnvisionAnywhere.com` Web Site Project) analyzes references-free, silently** — so every EnvisionWeb L1 number measured to date is partly computed on degraded data.

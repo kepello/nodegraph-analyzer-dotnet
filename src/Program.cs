@@ -138,6 +138,48 @@ static void RunOutput(AnalyzerArgs args, AnalyzerConfig config, bool msbuildAvai
         syntaxTrees: syntaxTrees,
         references: [MetadataReference.CreateFromFile(typeof(object).Assembly.Location)]);
 
+    // Fathom row dotnet-web-site-project-support (5.0.73): ASP.NET Web Site
+    // Projects have no .csproj, so MSBuildWorkspace can't load them and their
+    // files would fall to the references-free sharedCompilation. Detect WSPs
+    // from the .sln, build each a referenced Compilation from its DECLARED
+    // references (its OWN TFM's framework pack + ProjectReferences +
+    // web.config <assemblies>), and merge its files into projectMap so they
+    // get the same SemanticModel path as csproj files.
+    if (slnFiles.Count > 0 && csFiles.Count > 0)
+    {
+        var compilationsByAssemblyName = new Dictionary<string, Compilation>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (compilation, _) in projectMap.Values)
+            if (!string.IsNullOrEmpty(compilation.AssemblyName))
+                compilationsByAssemblyName[compilation.AssemblyName!] = compilation;
+
+        var globalPackagesDir = FrameworkReferenceResolver.GlobalPackagesDir();
+        var wspProblems = new List<object>();
+        var wspLoaded = 0;
+        foreach (var slnFile in slnFiles)
+        {
+            string slnContent;
+            try { slnContent = File.ReadAllText(slnFile); }
+            catch { continue; }
+            var slnDir = Path.GetDirectoryName(slnFile) ?? args.Path;
+            foreach (var wsp in WebSiteProjectParser.Parse(slnContent, slnDir))
+            {
+                var prefix = wsp.PhysicalPath + Path.DirectorySeparatorChar;
+                var wspCsFiles = csFiles
+                    .Where(f => f.StartsWith(prefix, StringComparison.Ordinal) && !projectMap.ContainsKey(f))
+                    .ToList();
+                if (wspCsFiles.Count == 0) continue;
+
+                var wspMap = WebSiteProjectLoader.Load(
+                    wsp, wspCsFiles, fileContents, compilationsByAssemblyName, globalPackagesDir, wspProblems);
+                foreach (var kv in wspMap) projectMap[kv.Key] = kv.Value;
+                wspLoaded += wspMap.Count;
+            }
+        }
+        foreach (var p in wspProblems) Emit(new { type = "problem", problem = p });
+        if (wspLoaded > 0)
+            Console.Error.WriteLine($".NET analyzer: Web Site Project support resolved {wspLoaded} file(s) with real references.");
+    }
+
     // Per-file iteration. Project-map hit uses the MSBuildWorkspace
     // compilation; orphan files use the sharedCompilation fallback.
     // Parallel ordering preserved; Console.WriteLine is atomic per call in .NET.
