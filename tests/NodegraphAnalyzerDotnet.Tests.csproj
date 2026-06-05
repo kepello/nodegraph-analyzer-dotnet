@@ -31,6 +31,8 @@
     <Compile Include="../src/Program.IntraClass.cs" Link="Program.IntraClass.cs" />
     <Compile Include="../src/Program.Naming.cs" Link="Program.Naming.cs" />
     <Compile Include="../src/Program.ReferencesFree.cs" Link="Program.ReferencesFree.cs" />
+    <Compile Include="../src/Program.WebSiteProject.cs" Link="Program.WebSiteProject.cs" />
+    <Compile Include="../src/Program.FrameworkReferences.cs" Link="Program.FrameworkReferences.cs" />
   </ItemGroup>
 
 </Project>
