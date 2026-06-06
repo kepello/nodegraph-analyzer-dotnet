@@ -31,10 +31,12 @@ public class CallResolutionIntegrationTests
     }
 
     /// <summary>Run the analyzer on <paramref name="dir"/> and return the
-    /// element-level edges (type, subtype, targetName, hasTargetRef) for the
-    /// artifact whose path ends with <paramref name="fileSuffix"/>, plus that
-    /// artifact's limitation kinds.</summary>
-    private static (List<(string Type, string? Subtype, string Target, bool HasTargetRef)> Edges,
+    /// element-level edges (type, subtype, targetName, hasTargetRef, external)
+    /// for the artifact whose path ends with <paramref name="fileSuffix"/>, plus
+    /// that artifact's limitation kinds. <c>External</c> reflects the edge's
+    /// <c>metadata.external == true</c> tag (the strict-emit marker for an
+    /// unbindable external-member call/write).</summary>
+    private static (List<(string Type, string? Subtype, string Target, bool HasTargetRef, bool External)> Edges,
         List<string> LimitationKinds)
         AnalyzeFile(string dir, string fileSuffix)
     {
@@ -59,7 +61,7 @@ public class CallResolutionIntegrationTests
         var stdout = proc.StandardOutput.ReadToEnd();
         proc.WaitForExit(60_000);
 
-        var edges = new List<(string, string?, string, bool)>();
+        var edges = new List<(string, string?, string, bool, bool)>();
         var limitations = new List<string>();
         foreach (var line in stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries))
         {
@@ -90,7 +92,11 @@ public class CallResolutionIntegrationTests
                         var subtype = e.TryGetProperty("subtype", out var st) ? st.GetString() : null;
                         var target = e.TryGetProperty("targetName", out var tn) ? tn.GetString() ?? "" : "";
                         var hasRef = e.TryGetProperty("targetRef", out _);
-                        edges.Add((type, subtype, target, hasRef));
+                        var external = e.TryGetProperty("metadata", out var md)
+                            && md.ValueKind == JsonValueKind.Object
+                            && md.TryGetProperty("external", out var ext)
+                            && ext.ValueKind == JsonValueKind.True;
+                        edges.Add((type, subtype, target, hasRef, external));
                     }
                 }
             }
@@ -246,6 +252,76 @@ class Internal {
             var epInt = AnalyzeEntryPoints(dir, "Internal.cs");
             // Public method on an INTERNAL type is not externally library-callable.
             Assert.Equal("none", epInt.GetValueOrDefault("internal/notexported"));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void ExternalMemberCall_ChainedAndQualified_EmitsExternalTaggedCallsEdge()
+    {
+        // Fathom row dotnet-l0-external-member-call-edges (5.0.75). A chained /
+        // qualified call whose method resolves to an EXTERNAL (BCL / library)
+        // declaration — `this.Items.Add(x)`, `_sb.Append("hi")` — used to emit
+        // ONLY a generic `references` edge, leaving `calls == 0`. The (correct)
+        // method-stereotype rules then saw a no-op → `unclassified` (the 326
+        // EnvisionWeb method residual). Fix: emit a `calls` edge tagged
+        // `metadata.external` so the behavioral count is non-zero, WITHOUT a
+        // targetRef (strict-emit: the external target is observably unbindable,
+        // not a phantom in-graph edge).
+        var dir = MakeTempTree(("Widget.cs", @"
+using System.Collections.Generic;
+using System.Text;
+public class Widget {
+    private List<int> _items = new List<int>();
+    public List<int> Items { get { return _items; } }
+    private StringBuilder _sb = new StringBuilder();
+    public void AddItem(int x) { this.Items.Add(x); }   // chained external call
+    public void Build() { _sb.Append(""hi""); }          // qualified external call
+}"));
+        try
+        {
+            var (edges, _) = AnalyzeFile(dir, "Widget.cs");
+            // External-member calls emit a `calls` edge tagged external, no targetRef.
+            Assert.Contains(edges, e => e.Type == "calls" && e.External
+                && e.Target.Contains("add") && !e.HasTargetRef);
+            Assert.Contains(edges, e => e.Type == "calls" && e.External
+                && e.Target.Contains("append") && !e.HasTargetRef);
+            // The external edge must NOT masquerade as a resolvable in-graph
+            // target (no targetRef on any external-tagged edge).
+            Assert.DoesNotContain(edges, e => e.External && e.HasTargetRef);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void ExternalPropertyAndIndexerWrite_EmitsExternalTaggedSetEdge()
+    {
+        // Fathom row dotnet-l0-external-member-call-edges (5.0.75). External
+        // property / indexer WRITES — `Session[k]=v`, `ctrl.Text=x` — used to
+        // emit only a generic `references` edge (`calls == 0`). Fix: emit a
+        // `calls`/`property-set` edge tagged external (no targetRef) so the
+        // mutation is counted as observable behavior. Mirrors the resolved
+        // accessor-call path, just for unbindable external accessors.
+        var dir = MakeTempTree(("Writer.cs", @"
+using System.Collections.Generic;
+using System.Text;
+public class Writer {
+    private Dictionary<string,int> _map = new Dictionary<string,int>();
+    private StringBuilder _sb = new StringBuilder();
+    public void Write() {
+        _map[""k""] = 1;        // external indexer write
+        _sb.Capacity = 16;     // external property write
+    }
+}"));
+        try
+        {
+            var (edges, _) = AnalyzeFile(dir, "Writer.cs");
+            // External indexer write → calls/property-set tagged external, no targetRef.
+            Assert.Contains(edges, e => e.Type == "calls" && e.Subtype == "property-set"
+                && e.External && !e.HasTargetRef);
+            // External property write (Capacity) likewise.
+            Assert.Contains(edges, e => e.Type == "calls" && e.Subtype == "property-set"
+                && e.External && e.Target.Contains("capacity") && !e.HasTargetRef);
         }
         finally { Directory.Delete(dir, true); }
     }

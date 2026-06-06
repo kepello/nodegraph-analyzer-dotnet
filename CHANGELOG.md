@@ -2,6 +2,22 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.37.0] — 2026-06-05
+
+External-member **behavioral edges** are no longer dropped (Fathom row `dotnet-l0-external-member-call-edges` 5.0.75 — the **root cause** of the 326 EnvisionWeb method-`unclassified`, per determination 3.1.1.1.8). The strict-emit budget silently dropped EVERY edge to an external (no-declaration) symbol, so a method whose body is all external collaboration — `this.Rows.Add(row)` (chained/qualified member call), `Session[k]=v` / `ctrl.Text=x` (external property/indexer write), `_sb.Append(...)` — emitted ONLY a generic `references` identifier edge. With `calls = callsMethod = accessesField = 0`, the (correct) L1 method-stereotype rules saw a no-op → `unclassified`. The miss was broader than the 326: every external-call-heavy method under-counted its external collaboration (a `collaborator-external`/`command` accuracy gap too).
+
+### Added
+
+- **External method invocations** (`ResolveExternalCallName`) — a call whose callee resolves to an external `IMethodSymbol` (no `DeclaringSyntaxReferences`) now emits a `calls`/`external` edge tagged `metadata.external = true`, targetName `{ContainingType}.{method}` (e.g. `system-collections-generic-list-int-add`).
+- **External property/indexer WRITES** (`ResolveExternalPropertyName`) — `Session[k]=v`, `ctrl.Text=x` now emit a `calls`/`property-set` edge tagged `metadata.external`. (Reads of external properties are far higher-volume and out of scope here — a noted follow-on.)
+- **Strict-emit honored via the tag, not omission**: external edges carry NO `targetRef` (the target is observably unbindable — not a resolvable phantom). The `metadata.external` flag is the no-silent-degradation marker: the edge feeds the behavioral counts (and efferent-coupling/CBO — external collaboration was genuinely under-counted) while staying distinguishable for any consumer that wants to exclude framework coupling.
+
+### Tests
+
+- 2 new `CallResolutionIntegrationTests` (chained/qualified external call → external-tagged `calls`, no targetRef; external property + indexer write → external-tagged `property-set`). 148 pass.
+
+**Pairs with** `@kepello/nodegraph-analysis@3.14.0` (L1 class-rule gaps 3.1.1.1.6). The version bump drives the analyzer epoch → stale memoizations self-invalidate on re-measure.
+
 ## [0.36.0] — 2026-06-04
 
 `baseTypes` (F7) now emits **fully-qualified** names (Fathom row `dotnet-basetypes-fqn-interfacer-precision` 3.1.1.1.7). Fixes the namespace-discarding omission — direct base `…Split('.').Last()` + transitive `b.Name` — that forced the L1 `interfacer` rule to match ambiguous simple tokens (a domain `Page` collided with `System.Web.UI.Page`; `Report` with `Telerik.Reporting.Report`). Now the transitive base-class chain + implemented interfaces emit via `FullyQualifiedFormat` (global:: omitted, type-args stripped so `ClientBase<T>` → `System.ServiceModel.ClientBase`). In-source global-namespace types stay simple; namespaced/external types emit the FQN — including unresolved error symbols, which preserve the source-written qualifier (`System.Windows.Forms.Form` even when WinForms isn't referenced). **Atomic with the engine catalogue migration** (`@kepello/nodegraph-analysis@3.13.0`) — until the catalogue is FQN, interfacer wouldn't match, so the two ship together. 3 `baseTypes` tests updated to FQN; 144 pass.

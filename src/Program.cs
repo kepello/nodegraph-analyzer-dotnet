@@ -1420,6 +1420,27 @@ static object[] ExtractRelationships(
         }
     }
 
+    // External-member edge (Fathom row dotnet-l0-external-member-call-edges
+    // 5.0.75). For a call / property-write whose member resolves to an EXTERNAL
+    // (BCL / referenced-library) declaration — `this.Rows.Add(x)`,
+    // `Session[k]=v`, `ctrl.Text=x` — emit the behavioral edge tagged
+    // `metadata.external` and WITHOUT a targetRef. The tag is the strict-emit
+    // marker: the target is observably unbindable (no in-graph element), so the
+    // edge feeds the behavioral counts (`calls` for method-stereotype +
+    // coupling) without masquerading as a resolvable phantom. Pre-fix these
+    // shapes emitted only a generic `references` identifier edge, leaving
+    // `calls == 0` and the (correct) stereotype rules at `unclassified`.
+    void AddExternal(string type, string subtype, string rawName)
+    {
+        var canonical = Canonicalize(rawName);
+        if (string.IsNullOrEmpty(canonical)) return;
+        var subtypeKey = $"{subtype}:{canonical}";
+        if (seen.Contains(subtypeKey)) return;
+        seen.Add(subtypeKey);
+        seen.Add($"{type}:{canonical}");
+        relationships.Add(new { type, subtype, targetName = canonical, metadata = new { external = true } });
+    }
+
     // Project-level resolver: try to resolve a syntax node to a cross-file
     // declaration's target file via the shared SemanticModel. Returns null
     // for same-file targets, external library symbols, or unresolvable
@@ -1573,6 +1594,53 @@ static object[] ExtractRelationships(
         }
     }
 
+    // Fathom row 5.0.75. When a call's callee resolves to an EXTERNAL method
+    // (a method symbol with no DeclaringSyntaxReferences — BCL / referenced
+    // library), return a stable, inspectable label `{ContainingType}.{name}`
+    // for the external-member `calls` edge. Returns null for in-source methods
+    // (handled by ResolveCallTarget), unresolved callees, and non-method
+    // symbols — keeping the external edge strictly to confirmed external calls.
+    string? ResolveExternalCallName(SyntaxNode callee)
+    {
+        try
+        {
+            var symbolInfo = semanticModel.GetSymbolInfo(callee);
+            var symbol = symbolInfo.Symbol ?? symbolInfo.CandidateSymbols.FirstOrDefault();
+            if (symbol is not IMethodSymbol method) return null;
+            if (method.DeclaringSyntaxReferences.Length > 0) return null; // in-source → not external
+            var owner = method.ContainingType?.ToDisplayString();
+            return string.IsNullOrEmpty(owner) ? method.Name : $"{owner}.{method.Name}";
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    // Fathom row 5.0.75. When a property / indexer access resolves to an
+    // EXTERNAL property symbol (no DeclaringSyntaxReferences — BCL / referenced
+    // library), return a stable label `{ContainingType}.{name}` for the
+    // external property-write `calls` edge. Returns null for in-source
+    // properties (handled by ResolveAccessorTarget), plain fields, and
+    // unresolved accesses.
+    string? ResolveExternalPropertyName(SyntaxNode memberAccess)
+    {
+        try
+        {
+            var symbolInfo = semanticModel.GetSymbolInfo(memberAccess);
+            var symbol = symbolInfo.Symbol ?? symbolInfo.CandidateSymbols.FirstOrDefault();
+            if (symbol is not IPropertySymbol prop) return null; // properties + indexers only (not fields)
+            if (prop.DeclaringSyntaxReferences.Length > 0) return null; // in-source → not external
+            var owner = prop.ContainingType?.ToDisplayString();
+            var name = prop.IsIndexer ? "indexer" : prop.Name;
+            return string.IsNullOrEmpty(owner) ? name : $"{owner}.{name}";
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     if (node is TypeDeclarationSyntax typeDecl && typeDecl.BaseList != null)
     {
         var isClass = node is ClassDeclarationSyntax;
@@ -1644,6 +1712,14 @@ static object[] ExtractRelationships(
             if (callTarget != null)
             {
                 AddWithTargetRef("calls", "direct", callTarget.Value.QualifiedRawName, callTarget.Value.FilePath);
+            }
+            else if (ResolveExternalCallName(invocation.Expression) is { } externalCallName)
+            {
+                // Resolves to an EXTERNAL method (BCL / library) — emit the
+                // behavioral `calls` edge tagged external so chained / qualified
+                // external calls (`this.Rows.Add(x)`) are counted, not dropped
+                // to a no-op. Fathom row 5.0.75.
+                AddExternal("calls", "external", externalCallName);
             }
             else if (allNames.Contains(calledName))
             {
@@ -1923,6 +1999,16 @@ static object[] ExtractRelationships(
                 isWrite ? "property-set" : "property-get",
                 accessorTarget.Value.QualifiedRawName,
                 accessorTarget.Value.FilePath);
+        }
+        else if (isWrite && ResolveExternalPropertyName(access) is { } externalPropName)
+        {
+            // External property / indexer WRITE (`Session[k]=v`, `ctrl.Text=x`)
+            // — emit the behavioral `calls`/`property-set` edge tagged external
+            // so the mutation is counted, not dropped to a no-op. Writes only:
+            // reads of external properties are far higher-volume and out of
+            // scope for the determined method-`unclassified` cases (Fathom row
+            // 5.0.75; external-read emission is a noted potential follow-on).
+            AddExternal("calls", "property-set", externalPropName);
         }
     }
 
