@@ -444,6 +444,41 @@ public class Writer {
         finally { Directory.Delete(dir, true); }
     }
 
+    [Fact]
+    public void PartialClass_CrossFileCallsMethod_EmitsCrossFileTargetRef()
+    {
+        // Fathom row dotnet-msbuildworkspace-documents-completeness (5.0.77). A
+        // partial type spans files: a constructor in Widget.cs calls Setup()
+        // declared in Widget.Designer.cs. The intra-class callsMethod edge must
+        // carry a cross-file targetRef to the .Designer.cs element — else the
+        // overlay resolves the bare `widget/setup` name WITHIN Widget.cs and the
+        // edge dangles (the 529 strict-edge-check failures on EnvisionWeb's
+        // report partials: ctor → InitializeComponent). Same-file calls stay
+        // bare (the overlay resolves them intra-artifact).
+        var dir = MakeTempTree(
+            ("Widget.cs", @"
+public partial class Widget {
+    public Widget() { this.Setup(); }       // cross-file → Widget.Designer.cs
+    public void Local() { this.Helper(); }  // same-file
+    public void Helper() { }
+}"),
+            ("Widget.Designer.cs", @"
+public partial class Widget {
+    public void Setup() { }
+}"));
+        try
+        {
+            var (edges, _) = AnalyzeFile(dir, "Widget.cs");
+            // Cross-file callsMethod (Setup lives in Widget.Designer.cs) carries a targetRef.
+            Assert.Contains(edges, e => e.Type == "callsMethod"
+                && e.Target.Contains("setup") && e.HasTargetRef);
+            // Same-file callsMethod (Helper in Widget.cs) stays bare — overlay resolves intra-artifact.
+            Assert.Contains(edges, e => e.Type == "callsMethod"
+                && e.Target.Contains("helper") && !e.HasTargetRef);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
     private static string MakeTempTree(params (string Name, string Body)[] files)
     {
         var dir = Path.Combine(Path.GetTempPath(), "fathom-callres-" + Guid.NewGuid().ToString("N"));

@@ -2,6 +2,26 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.40.0] — 2026-06-07
+
+Cross-file partial-class `callsMethod` edges now carry a **cross-file `targetRef`** (Fathom row `dotnet-msbuildworkspace-documents-completeness` 5.0.77 — the partial-`callsMethod`-targetRef root). The intra-class member-index fix (`@0.31.0`) made a partial type's cross-file calls EMIT — a report constructor in `Foo.cs` calling `InitializeComponent` declared in `Foo.Designer.cs` — but the edge's bare `class/member` targetName was resolved by the overlay WITHIN the source artifact (`{Foo.cs}#…`), so it couldn't bind to the member's element in the OTHER partial file (`{Foo.Designer.cs}#…`) → the edge dangled. Latent (the edges emitted+dangled since 0.31.0) until `fathom analyze`'s strict-edge-check (enabled for C# `@fathom-cli 4.36.0`, 2026-06-01) surfaced it: **529 unresolvable internal edges aborted analysis of EnvisionWeb** (every report partial's `ctor → InitializeComponent`). The MCP `ensureWarm` measure path doesn't run the strict-check, so the 326→224 / →107 measures succeeded throughout.
+
+### Fix
+
+- In the intra-class edge emission, build a member→declaring-file map across the type's partial declarations (same source as the member index). When a `callsMethod`/`accessesField` target is declared in a DIFFERENT partial file, emit an explicit `targetRef = MakeNaturalKey(canonicalizeFilePath(memberFile), qualifiedTarget)` — byte-identical to the member element's own natural key (case-canonicalized file). Same-file members keep the bare targetName (the overlay resolves intra-artifact). Ambiguous names (same name in 2+ partials) fall back to the bare name.
+
+### Diagnosis correction
+
+The 5.0.77 row first read as a `project.Documents`-completeness/path issue (case/space-named files). Verify-first disproved it: **4 of the 5 dangling sample files have exact-matching csproj/disk paths** — `InitializeComponent` IS in the compilation; the dangling is purely the missing cross-file targetRef. The Documents-completeness item (general references-free degradation for case/space-named files) remains a smaller, separate sibling on the row.
+
+### Validated (raw EnvisionWeb)
+
+- The previously-dangling `clientphoneemailduplicates/constructor` and `webformsubmissionbyclient/constructor` → `initializecomponent` edges now carry a `targetRef` that **resolves to the emitted element** (`.Designer.cs` key). Full `fathom analyze` + re-measure: pending.
+
+### Tests
+
+- 1 spawn integration (partial type across two files: cross-file `callsMethod` carries a targetRef; same-file stays bare; TDD red confirmed by neutering the cross-file branch). 159 pass.
+
 ## [0.39.0] — 2026-06-06
 
 Build-excluded (dead/uncompiled) `.cs` files are now **omitted from the corpus**, not analyzed references-free (Fathom row `dotnet-csproj-compile-set-coverage` 5.0.74). The analyzer discovers `.cs` by walking the source tree; a file inside a SUCCESSFULLY-LOADED project's directory but NOT in its compiled document set (not in the csproj's `<Compile>`) is code the build doesn't compile on ANY platform — dead generated output (an orphaned typed-DataSet `.Designer.cs` whose `.xsd` was dropped), excluded subfolders, leftovers. Analyzing them references-free polluted the corpus with non-built code and produced unresolved-symbol noise (this was the determination's *largest* "method-unclassified" bucket — the `EnvisionOnlineDataSet1.Designer.cs` `add*Row`/`remove*Row`/`initVars`, which the build excludes).

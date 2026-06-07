@@ -670,6 +670,57 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
                 var canonicalClass = string.Join("/", classQualifiedRaw.Split('/').Select(Canonicalize));
                 var rels = relationships.ToList();
                 var intraResult = IntraClassHelpers.ExtractEdges(node, memberIndex);
+
+                // Cross-file partial member → declaring-file map (Fathom row
+                // dotnet-msbuildworkspace-documents-completeness 5.0.77 — the
+                // partial-`callsMethod`-targetRef root). A partial type's members
+                // span files (a constructor in `Foo.cs` calls `InitializeComponent`
+                // declared in `Foo.Designer.cs`). The intra-class member index
+                // (0.31.0) made such edges EMIT, but their bare `class/member`
+                // targetName is resolved by the overlay WITHIN the source artifact
+                // → it can't bind to the member's element in the OTHER partial file
+                // → the edge dangles (failing `fathom analyze`'s strict-edge-check).
+                // So: when the target member is declared in a different partial
+                // file, carry an explicit cross-file targetRef to that file's
+                // element key. Built from the same partial declarations as
+                // memberIndex; ambiguous names (same name in 2+ files) fall back to
+                // the bare targetName.
+                var memberFileByName = new Dictionary<string, string>(StringComparer.Ordinal);
+                var ambiguousMembers = new HashSet<string>(StringComparer.Ordinal);
+                var partialDecls = typeDecls is { Count: > 0 }
+                    ? typeDecls
+                    : new List<TypeDeclarationSyntax> { containingType };
+                foreach (var decl in partialDecls)
+                {
+                    var declFile = decl.SyntaxTree.FilePath;
+                    void RegisterMember(string memberName)
+                    {
+                        var key = Canonicalize(memberName);
+                        if (string.IsNullOrEmpty(key)) return;
+                        if (memberFileByName.TryGetValue(key, out var existing))
+                        {
+                            if (existing != declFile) ambiguousMembers.Add(key);
+                        }
+                        else memberFileByName[key] = declFile;
+                    }
+                    foreach (var member in decl.Members)
+                    {
+                        switch (member)
+                        {
+                            case MethodDeclarationSyntax md3: RegisterMember(md3.Identifier.Text); break;
+                            case PropertyDeclarationSyntax pd3: RegisterMember(pd3.Identifier.Text); break;
+                            case EventDeclarationSyntax ed3: RegisterMember(ed3.Identifier.Text); break;
+                            case FieldDeclarationSyntax fd3:
+                                foreach (var v in fd3.Declaration.Variables) RegisterMember(v.Identifier.Text);
+                                break;
+                            case EventFieldDeclarationSyntax efd3:
+                                foreach (var v in efd3.Declaration.Variables) RegisterMember(v.Identifier.Text);
+                                break;
+                        }
+                    }
+                }
+                var currentFileCanon = canonicalizeFilePath(filePath);
+
                 foreach (var (edgeType, subtype, target) in intraResult.Edges)
                 {
                     var canonicalTarget = Canonicalize(target);
@@ -686,13 +737,34 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
                     var qualifiedTarget = string.IsNullOrEmpty(canonicalClass)
                         ? canonicalTarget
                         : $"{canonicalClass}/{canonicalTarget}";
-                    if (subtype is null)
+                    // Cross-file partial member (5.0.77): explicit targetRef to the
+                    // member's declaring file when it differs from this file. Same
+                    // file → bare targetName (overlay resolves intra-artifact). The
+                    // targetRef mirrors AddWithTargetRef + the element's own
+                    // natural-key form (MakeNaturalKey over the case-canonicalized
+                    // file), so it binds byte-identically.
+                    string? crossFileRef = null;
+                    var memberKey = Canonicalize(target.Split('(')[0]);
+                    if (!string.IsNullOrEmpty(memberKey)
+                        && !ambiguousMembers.Contains(memberKey)
+                        && memberFileByName.TryGetValue(memberKey, out var memberFile)
+                        && canonicalizeFilePath(memberFile) != currentFileCanon)
                     {
-                        rels.Add(new { type = edgeType, targetName = qualifiedTarget });
+                        crossFileRef = MakeNaturalKey(canonicalizeFilePath(memberFile), qualifiedTarget);
+                    }
+                    if (crossFileRef is null)
+                    {
+                        if (subtype is null)
+                            rels.Add(new { type = edgeType, targetName = qualifiedTarget });
+                        else
+                            rels.Add(new { type = edgeType, subtype, targetName = qualifiedTarget });
                     }
                     else
                     {
-                        rels.Add(new { type = edgeType, subtype, targetName = qualifiedTarget });
+                        if (subtype is null)
+                            rels.Add(new { type = edgeType, targetName = qualifiedTarget, targetRef = crossFileRef });
+                        else
+                            rels.Add(new { type = edgeType, subtype, targetName = qualifiedTarget, targetRef = crossFileRef });
                     }
                 }
                 relationships = rels.ToArray();
