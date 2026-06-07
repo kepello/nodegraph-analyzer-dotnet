@@ -2,6 +2,30 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.39.0] — 2026-06-06
+
+Build-excluded (dead/uncompiled) `.cs` files are now **omitted from the corpus**, not analyzed references-free (Fathom row `dotnet-csproj-compile-set-coverage` 5.0.74). The analyzer discovers `.cs` by walking the source tree; a file inside a SUCCESSFULLY-LOADED project's directory but NOT in its compiled document set (not in the csproj's `<Compile>`) is code the build doesn't compile on ANY platform — dead generated output (an orphaned typed-DataSet `.Designer.cs` whose `.xsd` was dropped), excluded subfolders, leftovers. Analyzing them references-free polluted the corpus with non-built code and produced unresolved-symbol noise (this was the determination's *largest* "method-unclassified" bucket — the `EnvisionOnlineDataSet1.Designer.cs` `add*Row`/`remove*Row`/`initVars`, which the build excludes).
+
+These are DISTINCT from a true orphan (a `.cs` under no loaded project at all — still references-free, the 5.0.72 path). Generated-at-build files whose source IS in the csproj (an `.xsd`/`.tt` with a generator) remain in the project's Documents and stay analyzed.
+
+### Added
+
+- **`CompileSetCoverage`** (`Program.CompileSetCoverage.cs`) — `IsUnderAnyProjectDir` (build-excluded predicate) + `BuildSummaryProblem` (one proportional `warning` naming the largest roots).
+- `MSBuildIntegration.LoadProjects` now surfaces the successfully-loaded project directories (from the loaded solution, so a project that FAILED to load doesn't mark its files build-excluded).
+- The run **enumerates every build-excluded file** to stderr — so a re-analysis captures the full dead-code AUDIT, not just the summary count.
+
+### Behavior
+
+- A build-excluded `.cs` is omitted from analysis (no artifact emitted) + counted in the warning. NSD: observable, never a silent drop.
+
+### Validated (raw EnvisionWeb)
+
+- **20 of 1,864 files EXCLUDED** (ReportLib 15, EnvisionReportSiteHTML5 3, CloudCore 2) — the orphaned typed-DataSet among them. References-free dropped to **0** (those 20 were the entire references-free residual; they're dead, not under-resolved).
+
+### Tests
+
+- 1 spawn integration (old-style csproj: file in `<Compile>` analyzed, file NOT in `<Compile>` omitted + warning; TDD red confirmed by bypassing the branch) + 5 unit (`IsUnderAnyProjectDir` under/sibling-collision/empty; `BuildSummaryProblem` null/warning-roots). 157 pass.
+
 ## [0.38.0] — 2026-06-06
 
 Old-style **csproj bare-GAC framework references** now resolve cross-platform (Fathom row `dotnet-l0-external-symbol-resolution-residual` 5.0.76.a). An old-style (non-SDK) .NET Framework csproj references framework assemblies as bare GAC refs (`<Reference Include="System.Data" />`, no `HintPath`). On macOS/Linux there is no GAC, and old-style projects don't auto-import the `Microsoft.NETFramework.ReferenceAssemblies` pack, so MSBuild's RAR couldn't resolve them — `System.Data` et al. became error symbols and every member access through them (DataTable manipulation, the whole report-query data layer) silently dropped its edge. This is the EXACT mechanism the WSP support (5.0.73) handles, but for csprojs.

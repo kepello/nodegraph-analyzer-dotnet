@@ -110,7 +110,7 @@ static class ReferencesFreeReporting
     /// to (e.g. <c>EnvisionAnywhere.com</c>). Empty when the file sits directly
     /// in the root or isn't under it.
     /// </summary>
-    static string TopRoot(string filePath, string repoRoot)
+    public static string TopRoot(string filePath, string repoRoot)
     {
         string rel;
         try { rel = Path.GetRelativePath(repoRoot, filePath); }

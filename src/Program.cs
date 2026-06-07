@@ -98,9 +98,15 @@ static void RunOutput(AnalyzerArgs args, AnalyzerConfig config, bool msbuildAvai
     Dictionary<string, (Compilation Compilation, SyntaxTree SyntaxTree)> projectMap =
         new(StringComparer.Ordinal);
     var projectProblems = new List<object>();
+    // Successfully-loaded project directories (Fathom row
+    // dotnet-csproj-compile-set-coverage 5.0.74) — used to distinguish a
+    // BUILD-EXCLUDED .cs (under a loaded project's tree but not its <Compile>
+    // set → dead/uncompiled code, skip it) from a true ORPHAN (no project →
+    // references-free).
+    var loadedProjectDirs = new List<string>();
     if (msbuildAvailable && csprojFiles.Count > 0)
     {
-        projectMap = MSBuildIntegration.LoadProjects(csprojFiles, projectProblems);
+        projectMap = MSBuildIntegration.LoadProjects(csprojFiles, projectProblems, loadedProjectDirs);
         Console.Error.WriteLine($".NET analyzer: MSBuildWorkspace loaded {projectMap.Count} document(s) from {csprojFiles.Count} project(s); {projectProblems.Count} problem(s).");
     }
     foreach (var p in projectProblems)
@@ -187,6 +193,11 @@ static void RunOutput(AnalyzerArgs args, AnalyzerConfig config, bool msbuildAvai
     // files fall to the references-free `sharedCompilation` so the run can
     // emit ONE proportional summary problem (below) — no-silent-degradation.
     var referencesFreeFiles = new ConcurrentBag<string>();
+    // Fathom row dotnet-csproj-compile-set-coverage (5.0.74): .cs files under a
+    // loaded project's tree but absent from its <Compile> set — build-excluded
+    // dead/uncompiled code, omitted from the corpus (warned below), NOT analyzed
+    // references-free.
+    var buildExcludedFiles = new ConcurrentBag<string>();
     Parallel.ForEach(syntaxTrees, tree =>
     {
         var filePath = tree.FilePath;
@@ -201,6 +212,14 @@ static void RunOutput(AnalyzerArgs args, AnalyzerConfig config, bool msbuildAvai
                 compilationForFile = projectEntry.Compilation;
                 treeForFile = projectEntry.SyntaxTree;
                 referencesFree = false;
+            }
+            else if (CompileSetCoverage.IsUnderAnyProjectDir(filePath, loadedProjectDirs))
+            {
+                // Owned by a loaded project's directory but not in its compiled
+                // document set → the build excludes it (dead/generated/excluded
+                // code). Omit from the corpus; do NOT analyze references-free.
+                buildExcludedFiles.Add(filePath);
+                return;
             }
             else
             {
@@ -231,6 +250,22 @@ static void RunOutput(AnalyzerArgs args, AnalyzerConfig config, bool msbuildAvai
     {
         Emit(new { type = "problem", problem = refFreeSummary });
         Console.Error.WriteLine($".NET analyzer: {refFreeSummary["severity"]} — {refFreeSummary["message"]}");
+    }
+
+    // Fathom row dotnet-csproj-compile-set-coverage (5.0.74): one proportional
+    // warning naming the build-excluded (dead/uncompiled) .cs omitted from the
+    // corpus — observable, never a silent drop. ALSO the audit deliverable: the
+    // message + stderr line enumerate which tier the dead code sits in.
+    var excludedSummary = CompileSetCoverage.BuildSummaryProblem(
+        csFiles.Count, buildExcludedFiles, args.Path);
+    if (excludedSummary != null)
+    {
+        Emit(new { type = "problem", problem = excludedSummary });
+        Console.Error.WriteLine($".NET analyzer: {excludedSummary["severity"]} — {excludedSummary["message"]}");
+        // Enumerate the excluded files on stderr so a re-analysis run captures
+        // the full dead-code audit (not just the proportional summary).
+        foreach (var f in buildExcludedFiles.OrderBy(x => x))
+            Console.Error.WriteLine($".NET analyzer: build-excluded (not compiled): {f}");
     }
 
     // Structural emission for project + solution files. XML / text

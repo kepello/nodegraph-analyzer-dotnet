@@ -326,6 +326,114 @@ public class Writer {
         finally { Directory.Delete(dir, true); }
     }
 
+    /// <summary>Spawn the analyzer on <paramref name="dir"/> and return every
+    /// emitted artifact id, the run-level problems (severity, message), and the
+    /// process stderr (operational log lines).</summary>
+    private static (List<string> ArtifactIds, List<(string Severity, string Message)> Problems, string Stderr)
+        AnalyzeDir(string dir)
+    {
+        var dll = AnalyzerDll();
+        Assert.True(dll != null, "analyzer DLL not built");
+        var psi = new ProcessStartInfo("dotnet")
+        {
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        psi.ArgumentList.Add(dll!);
+        psi.ArgumentList.Add("--path");
+        psi.ArgumentList.Add(dir);
+        using var proc = Process.Start(psi)!;
+        proc.StandardInput.Write("{}");
+        proc.StandardInput.Close();
+        var stdout = proc.StandardOutput.ReadToEnd();
+        var stderr = proc.StandardError.ReadToEnd();
+        proc.WaitForExit(60_000);
+
+        var artifactIds = new List<string>();
+        var problems = new List<(string, string)>();
+        foreach (var line in stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            JsonDocument doc;
+            try { doc = JsonDocument.Parse(line); } catch { continue; }
+            using (doc)
+            {
+                var root = doc.RootElement;
+                if (!root.TryGetProperty("type", out var t)) continue;
+                var type = t.GetString();
+                if (type == "artifact" && root.TryGetProperty("artifact", out var a)
+                    && a.TryGetProperty("id", out var id))
+                {
+                    artifactIds.Add(id.GetString() ?? "");
+                }
+                else if (type == "problem" && root.TryGetProperty("problem", out var p))
+                {
+                    var sev = p.TryGetProperty("severity", out var s) ? s.GetString() ?? "" : "";
+                    var msg = p.TryGetProperty("message", out var m) ? m.GetString() ?? "" : "";
+                    problems.Add((sev, msg));
+                }
+            }
+        }
+        return (artifactIds, problems, stderr);
+    }
+
+    // The analyzer logs "MSBuildWorkspace loaded N document(s)" — a load with
+    // N>=1 confirms MSBuild was located + the project opened (so the exclusion
+    // path is exercisable). Gates the build-excluded assertions off a real load.
+    private static bool ProjectLoaded(string stderr)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(stderr, @"loaded (\d+) document");
+        return m.Success && int.Parse(m.Groups[1].Value) >= 1;
+    }
+
+    [Fact]
+    public void BuildExcludedCsproj_FileNotInCompileSet_IsOmittedNotAnalyzedReferencesFree()
+    {
+        // Fathom row dotnet-csproj-compile-set-coverage (5.0.74). An old-style
+        // csproj compiles only its explicit <Compile> items. A .cs sitting in the
+        // project dir but NOT in <Compile> (a dead/generated/excluded file — the
+        // EnvisionWeb orphaned typed-DataSet shape) is build-excluded: omitted
+        // from the corpus + a `warning` emitted, NOT analyzed references-free.
+        if (OperatingSystem.IsWindows()) return; // resolution/exclusion path is non-Windows
+        var dir = MakeTempTree(
+            ("Old.csproj",
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" +
+                "<Project ToolsVersion=\"12.0\" DefaultTargets=\"Build\" xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\">\n" +
+                "  <Import Project=\"$(MSBuildExtensionsPath)\\$(MSBuildToolsVersion)\\Microsoft.Common.props\" Condition=\"Exists('$(MSBuildExtensionsPath)\\$(MSBuildToolsVersion)\\Microsoft.Common.props')\" />\n" +
+                "  <PropertyGroup>\n" +
+                "    <Configuration Condition=\" '$(Configuration)' == '' \">Debug</Configuration>\n" +
+                "    <Platform Condition=\" '$(Platform)' == '' \">AnyCPU</Platform>\n" +
+                "    <OutputType>Library</OutputType>\n" +
+                "    <RootNamespace>Old</RootNamespace>\n" +
+                "    <AssemblyName>Old</AssemblyName>\n" +
+                "    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>\n" +
+                "  </PropertyGroup>\n" +
+                "  <ItemGroup><Reference Include=\"System\" /></ItemGroup>\n" +
+                "  <ItemGroup>\n" +
+                "    <Compile Include=\"Live.cs\" />\n" +  // Dead.cs intentionally NOT listed
+                "  </ItemGroup>\n" +
+                "  <Import Project=\"$(MSBuildToolsPath)\\Microsoft.CSharp.targets\" />\n" +
+                "</Project>\n"),
+            ("Live.cs", "public class Live { public void M() { } }"),
+            ("Dead.cs", "public class Dead { public void M() { } }"));
+        try
+        {
+            var (artifactIds, problems, stderr) = AnalyzeDir(dir);
+            if (!ProjectLoaded(stderr)) return; // no MSBuild on host — exclusion path not exercisable
+            var ids = artifactIds.Select(s => s.Replace('\\', '/')).ToList();
+            // Sanity: the project loaded and Live.cs (in <Compile>) WAS analyzed.
+            Assert.Contains(ids, s => s.EndsWith("/Live.cs"));
+            // Dead.cs (not in <Compile>) must be OMITTED — no artifact emitted.
+            Assert.DoesNotContain(ids, s => s.EndsWith("/Dead.cs"));
+            // And the omission is observable: a build-excluded warning fired.
+            Assert.Contains(problems, p => p.Severity == "warning"
+                && p.Message.Contains("EXCLUDED from analysis")
+                && p.Message.Contains("<Compile>"));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
     private static string MakeTempTree(params (string Name, string Body)[] files)
     {
         var dir = Path.Combine(Path.GetTempPath(), "fathom-callres-" + Guid.NewGuid().ToString("N"));

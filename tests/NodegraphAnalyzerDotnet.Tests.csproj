@@ -33,6 +33,7 @@
     <Compile Include="../src/Program.ReferencesFree.cs" Link="Program.ReferencesFree.cs" />
     <Compile Include="../src/Program.WebSiteProject.cs" Link="Program.WebSiteProject.cs" />
     <Compile Include="../src/Program.FrameworkReferences.cs" Link="Program.FrameworkReferences.cs" />
+    <Compile Include="../src/Program.CompileSetCoverage.cs" Link="Program.CompileSetCoverage.cs" />
   </ItemGroup>
 
 </Project>

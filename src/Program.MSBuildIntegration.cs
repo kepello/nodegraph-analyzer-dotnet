@@ -34,7 +34,8 @@ static class MSBuildIntegration
     /// the same effect across multiple test invocations.
     /// </summary>
     public static Dictionary<string, (Compilation Compilation, SyntaxTree SyntaxTree)>
-        LoadProjects(IReadOnlyList<string> csprojPaths, List<object> problems)
+        LoadProjects(IReadOnlyList<string> csprojPaths, List<object> problems,
+            List<string>? loadedProjectDirs = null)
     {
         var map = new Dictionary<string, (Compilation, SyntaxTree)>();
 
@@ -123,6 +124,28 @@ static class MSBuildIntegration
         // wasn't in csprojPaths, which matches the analyzer's intent:
         // any .cs file the workspace can resolve gets the workspace's
         // Compilation.
+        // Successfully-loaded project directories (Fathom row
+        // dotnet-csproj-compile-set-coverage 5.0.74). A .cs under one of these
+        // but NOT in any project's Documents is BUILD-EXCLUDED (dead/generated/
+        // excluded code the build doesn't compile) — distinct from a true orphan
+        // with no project at all. Derived from the loaded solution (not the
+        // discovered csproj paths) so a project that FAILED to load doesn't mark
+        // its files build-excluded. Trailing separator so a dir prefix can't
+        // false-match a sibling (`/ReportLib` vs `/ReportLibTests`).
+        if (loadedProjectDirs != null)
+        {
+            var seenDirs = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var project in workspace.CurrentSolution.Projects)
+            {
+                var projPath = project.FilePath;
+                if (string.IsNullOrEmpty(projPath)) continue;
+                var dir = Path.GetDirectoryName(projPath);
+                if (string.IsNullOrEmpty(dir)) continue;
+                var withSep = dir.EndsWith(Path.DirectorySeparatorChar) ? dir : dir + Path.DirectorySeparatorChar;
+                if (seenDirs.Add(withSep)) loadedProjectDirs.Add(withSep);
+            }
+        }
+
         foreach (var project in workspace.CurrentSolution.Projects)
         {
             Compilation? compilation;
