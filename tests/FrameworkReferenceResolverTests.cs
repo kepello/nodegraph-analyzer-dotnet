@@ -65,6 +65,77 @@ public class FrameworkReferenceResolverTests
         finally { Directory.Delete(root, recursive: true); }
     }
 
+    // --- Combined reference-assembly root (5.0.76.a) -------------------------
+
+    private static string MakeSyntheticPack(string root, string packShortTfm, string version, string versionDir, string sentinelDll)
+    {
+        var dir = Path.Combine(root, $"microsoft.netframework.referenceassemblies.{packShortTfm}", version, "build", ".NETFramework", versionDir);
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, sentinelDll), "");
+        return dir;
+    }
+
+    [Fact]
+    public void Discover_finds_one_dir_per_pack_newest_version_ignores_non_packs()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "fwdisc-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            MakeSyntheticPack(root, "net48", "1.0.0", "v4.8", "System.Data.dll"); // older
+            var newest48 = MakeSyntheticPack(root, "net48", "1.0.3", "v4.8", "System.Data.dll");
+            MakeSyntheticPack(root, "net472", "1.0.3", "v4.7.2", "System.Data.dll");
+            // Non-pack dir must be ignored.
+            Directory.CreateDirectory(Path.Combine(root, "newtonsoft.json", "13.0.3", "lib"));
+
+            var dirs = FrameworkReferenceResolver.DiscoverReferenceAssemblyDirs(root);
+
+            Assert.Equal(2, dirs.Count); // one per TFM (net48, net472), non-pack ignored
+            var v48 = dirs.Single(d => d.VersionDir == "v4.8");
+            Assert.Equal(newest48, v48.Path);    // newest pack version chosen
+            Assert.Contains(dirs, d => d.VersionDir == "v4.7.2");
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void Discover_returns_empty_when_no_packs()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "fwdisc-empty-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try { Assert.Empty(FrameworkReferenceResolver.DiscoverReferenceAssemblyDirs(root)); }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void CombinedRoot_symlinks_each_pack_version_dir()
+    {
+        if (OperatingSystem.IsWindows()) return; // builder is non-Windows-only by design
+        var root = Path.Combine(Path.GetTempPath(), "fwcomb-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            MakeSyntheticPack(root, "net48", "1.0.3", "v4.8", "System.Data.dll");
+            MakeSyntheticPack(root, "net472", "1.0.3", "v4.7.2", "System.Data.dll");
+
+            var combined = FrameworkReferenceResolver.BuildCombinedReferenceAssemblyRoot(root);
+            Assert.NotNull(combined);
+            // RAR resolves <root>/.NETFramework/<TFM>/<assembly>.dll — both TFMs
+            // present so a single TargetFrameworkRootPath serves any project TFM.
+            Assert.True(File.Exists(Path.Combine(combined!, ".NETFramework", "v4.8", "System.Data.dll")));
+            Assert.True(File.Exists(Path.Combine(combined!, ".NETFramework", "v4.7.2", "System.Data.dll")));
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void CombinedRoot_null_when_no_packs_restored()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        var root = Path.Combine(Path.GetTempPath(), "fwcomb-empty-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try { Assert.Null(FrameworkReferenceResolver.BuildCombinedReferenceAssemblyRoot(root)); }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
     [Fact]
     public void Real_cache_net48_resolves_with_system_web_when_restored()
     {

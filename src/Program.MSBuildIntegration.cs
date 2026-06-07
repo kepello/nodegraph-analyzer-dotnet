@@ -38,13 +38,33 @@ static class MSBuildIntegration
     {
         var map = new Dictionary<string, (Compilation, SyntaxTree)>();
 
+        // Old-style (non-SDK) .NET Framework csprojs reference framework
+        // assemblies as BARE GAC references (`<Reference Include="System.Data" />`,
+        // no HintPath). On macOS/Linux there is no GAC and these projects don't
+        // auto-import the ReferenceAssemblies pack, so MSBuild's RAR can't resolve
+        // them — System.Data et al. become error symbols and every member access
+        // through them (typed-DataSet ops, DataTable manipulation) drops its edge
+        // (Fathom row dotnet-l0-external-symbol-resolution-residual 5.0.76.a).
+        // Feed RAR the ReferenceAssemblies packs via `TargetFrameworkRootPath` —
+        // the SAME mechanism the pack's own targets use for SDK-style projects —
+        // so bare framework refs resolve cross-platform. Null on Windows (GAC
+        // resolves natively) or when no packs are restored (analysis stays
+        // references-free, flagged by the 5.0.72 Limitation — NSD).
+        var referenceAssemblyRoot = FrameworkReferenceResolver.BuildCombinedReferenceAssemblyRoot(
+            FrameworkReferenceResolver.GlobalPackagesDir());
+
         // Single workspace shared across all .csproj — MSBuildWorkspace
         // memoizes references, so opening sibling ProjectReference
         // projects twice (once standalone, once transitively) hits cache.
         MSBuildWorkspace workspace;
         try
         {
-            workspace = MSBuildWorkspace.Create();
+            workspace = referenceAssemblyRoot != null
+                ? MSBuildWorkspace.Create(new Dictionary<string, string>
+                {
+                    ["TargetFrameworkRootPath"] = referenceAssemblyRoot,
+                })
+                : MSBuildWorkspace.Create();
         }
         catch (Exception ex)
         {

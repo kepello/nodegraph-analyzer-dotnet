@@ -2,6 +2,29 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.38.0] — 2026-06-06
+
+Old-style **csproj bare-GAC framework references** now resolve cross-platform (Fathom row `dotnet-l0-external-symbol-resolution-residual` 5.0.76.a). An old-style (non-SDK) .NET Framework csproj references framework assemblies as bare GAC refs (`<Reference Include="System.Data" />`, no `HintPath`). On macOS/Linux there is no GAC, and old-style projects don't auto-import the `Microsoft.NETFramework.ReferenceAssemblies` pack, so MSBuild's RAR couldn't resolve them — `System.Data` et al. became error symbols and every member access through them (DataTable manipulation, the whole report-query data layer) silently dropped its edge. This is the EXACT mechanism the WSP support (5.0.73) handles, but for csprojs.
+
+### How MS resolves this (the mechanism we now use)
+
+.NET Framework's GAC/Reference-Assemblies are Windows-only. The cross-platform path is the `Microsoft.NETFramework.ReferenceAssemblies.netXX` NuGet pack, which sets **`TargetFrameworkRootPath`** → its `build/` dir; RAR then resolves `<root>/.NETFramework/vX.X/<assembly>.dll`. SDK-style projects auto-import the pack; old-style csprojs don't. So we feed MSBuildWorkspace the same property.
+
+### Added
+
+- **`FrameworkReferenceResolver.DiscoverReferenceAssemblyDirs`** — finds every restored ReferenceAssemblies pack (newest version per TFM) → its `(versionDir, path)`.
+- **`FrameworkReferenceResolver.BuildCombinedReferenceAssemblyRoot`** — assembles ONE root (symlinking each pack's `vX.X` dir) so a single workspace-global `TargetFrameworkRootPath` serves projects of any TFM (RAR selects by each project's `TargetFrameworkVersion`). Non-Windows only (Windows resolves bare refs from the GAC); null when no packs restored (analysis stays references-free, flagged by the 5.0.72 Limitation — NSD).
+- `MSBuildIntegration.LoadProjects` passes `TargetFrameworkRootPath` to `MSBuildWorkspace.Create` when the combined root is available.
+
+### Validated (raw EnvisionWeb, production DLL)
+
+- **ReportLib `system.data` external edges: 0 → 1,095** (+3,656 total external edges); MSBuild load **3 problems → 0**. ReportLib's compiled data layer, previously invisible, now resolves.
+- **Scope note:** the determination's *largest* method bucket — the typed-DataSet `EnvisionOnlineDataSet1.Designer.cs` (`add*Row`/`remove*Row`/`initVars`) — is NOT fixed by this and is NOT a resolution gap: that file is **dead generated code absent from the csproj's `<Compile>` set** (and unreferenced by any compiled code workspace-wide), so the analyzer's references-free directory-walk fallback was analyzing code the build excludes on *every* platform. That's sub-cause (c) → row `dotnet-csproj-compile-set-coverage` (5.0.74), re-scoped to EXCLUDE build-excluded `.cs` (with a warning), not resolve it.
+
+### Tests
+
+- 1 integration (old-style net48 csproj + bare `System.Data` ref → `this._t.Rows.Add(r)` resolves to `DataRowCollection.Add`; host-conditional + non-Windows) + 4 unit (discovery newest-version/ignore-non-packs/empty; combined-root symlinks/null-when-empty). 151 pass.
+
 ## [0.37.0] — 2026-06-05
 
 External-member **behavioral edges** are no longer dropped (Fathom row `dotnet-l0-external-member-call-edges` 5.0.75 — the **root cause** of the 326 EnvisionWeb method-`unclassified`, per determination 3.1.1.1.8). The strict-emit budget silently dropped EVERY edge to an external (no-declaration) symbol, so a method whose body is all external collaboration — `this.Rows.Add(row)` (chained/qualified member call), `Session[k]=v` / `ctrl.Text=x` (external property/indexer write), `_sb.Append(...)` — emitted ONLY a generic `references` identifier edge. With `calls = callsMethod = accessesField = 0`, the (correct) L1 method-stereotype rules saw a no-op → `unclassified`. The miss was broader than the 326: every external-call-heavy method under-counted its external collaboration (a `collaborator-external`/`command` accuracy gap too).

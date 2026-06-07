@@ -207,6 +207,87 @@ public class MSBuildIntegrationTests
         Assert.Empty(symbol!.DeclaringSyntaxReferences);
     }
 
+    // ---------- 6. Old-style csproj bare framework ref (5.0.76.a) ----------
+
+    [Fact]
+    public void LoadProjects_OldStyleCsproj_BareFrameworkRef_ResolvesSystemDataOnMacLinux()
+    {
+        // Fathom row dotnet-l0-external-symbol-resolution-residual 5.0.76.a.
+        // An OLD-STYLE (non-SDK) .NET Framework csproj references System.Data as
+        // a BARE GAC reference (no HintPath) — the EnvisionWeb ReportLib shape.
+        // On macOS/Linux there's no GAC, and old-style csprojs don't auto-import
+        // the Microsoft.NETFramework.ReferenceAssemblies pack, so System.Data was
+        // an error symbol → `this._t.Rows.Add(r)` didn't resolve → no edge → the
+        // method fell to `unclassified`. The fix feeds MSBuildWorkspace the pack
+        // via TargetFrameworkRootPath so MSBuild's native RAR resolves it.
+        if (OperatingSystem.IsWindows()) return; // Windows resolves bare refs from the GAC — N/A.
+        if (!RegisterMsbuild()) return;          // no MSBuild on host — skip.
+        // Host-conditional: only meaningful when the net48 reference-assemblies
+        // pack is actually restored (it is on this dev machine; CI without it skips).
+        if (FrameworkReferenceResolver.ResolveReferenceAssemblyDir(
+                ".NETFramework,Version=v4.8", FrameworkReferenceResolver.GlobalPackagesDir()) == null)
+        {
+            return;
+        }
+
+        var dir = Path.Combine(Path.GetTempPath(), "fathom-oldcsproj-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            File.WriteAllText(Path.Combine(dir, "Old.csproj"),
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" +
+                "<Project ToolsVersion=\"12.0\" DefaultTargets=\"Build\" xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\">\n" +
+                "  <Import Project=\"$(MSBuildExtensionsPath)\\$(MSBuildToolsVersion)\\Microsoft.Common.props\" Condition=\"Exists('$(MSBuildExtensionsPath)\\$(MSBuildToolsVersion)\\Microsoft.Common.props')\" />\n" +
+                "  <PropertyGroup>\n" +
+                "    <Configuration Condition=\" '$(Configuration)' == '' \">Debug</Configuration>\n" +
+                "    <Platform Condition=\" '$(Platform)' == '' \">AnyCPU</Platform>\n" +
+                "    <OutputType>Library</OutputType>\n" +
+                "    <RootNamespace>Old</RootNamespace>\n" +
+                "    <AssemblyName>Old</AssemblyName>\n" +
+                "    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>\n" +
+                "  </PropertyGroup>\n" +
+                "  <ItemGroup>\n" +
+                "    <Reference Include=\"System\" />\n" +
+                "    <Reference Include=\"System.Data\" />\n" +
+                "  </ItemGroup>\n" +
+                "  <ItemGroup>\n" +
+                "    <Compile Include=\"Box.cs\" />\n" +
+                "  </ItemGroup>\n" +
+                "  <Import Project=\"$(MSBuildToolsPath)\\Microsoft.CSharp.targets\" />\n" +
+                "</Project>\n");
+            var boxCs = Path.Combine(dir, "Box.cs");
+            File.WriteAllText(boxCs,
+                "using System.Data;\n" +
+                "public class Box {\n" +
+                "    private DataTable _t = new DataTable();\n" +
+                "    public void Add(DataRow r) { this._t.Rows.Add(r); }\n" +
+                "}\n");
+
+            var problems = new List<object>();
+            var map = MSBuildIntegration.LoadProjects(new[] { Path.Combine(dir, "Old.csproj") }, problems);
+
+            Assert.True(map.ContainsKey(boxCs), "Box.cs not loaded from the old-style csproj");
+            var (compilation, tree) = map[boxCs];
+            var model = compilation.GetSemanticModel(tree);
+
+            // `this._t.Rows.Add(r)` must resolve to System.Data.DataRowCollection.Add
+            // (an external metadata symbol). Pre-fix, System.Data is an error symbol
+            // and GetSymbolInfo().Symbol is null → the call edge is never emitted.
+            var addCall = tree.GetRoot().DescendantNodes()
+                .OfType<InvocationExpressionSyntax>()
+                .First(inv => inv.Expression is MemberAccessExpressionSyntax m
+                    && m.Name.Identifier.Text == "Add");
+            var symbol = model.GetSymbolInfo(addCall.Expression).Symbol;
+            Assert.NotNull(symbol); // System.Data resolved
+            Assert.IsAssignableFrom<IMethodSymbol>(symbol);
+            Assert.Equal("DataRowCollection", symbol!.ContainingType?.Name);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
     // ---------- 5. Orphan fallback ----------
 
     [Fact]
