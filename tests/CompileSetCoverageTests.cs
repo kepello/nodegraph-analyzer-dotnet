@@ -35,6 +35,29 @@ public class CompileSetCoverageTests
     }
 
     [Fact]
+    public void ParseCompiledFilePaths_resolves_backslash_relative_includes_skips_wildcards()
+    {
+        var csprojDir = $"{Sep}repo{Sep}ReportLib";
+        var content =
+            "<Project>\n" +
+            "  <ItemGroup>\n" +
+            "    <Compile Include=\"code\\ReportConfiguration\\ConfigurationBase.cs\" />\n" +
+            "    <Compile Include=\"Foo.designer.cs\" />\n" +
+            "    <Compile Include=\"**\\*.cs\" />\n" +          // wildcard → skipped (Documents covers)
+            "    <Compile Include=\"$(IntermediateOutputPath)gen.cs\" />\n" + // property → skipped
+            "  </ItemGroup>\n" +
+            "</Project>\n";
+        var paths = CompileSetCoverage.ParseCompiledFilePaths(content, csprojDir).ToList();
+        // Backslash separators resolved relative to the csproj dir.
+        Assert.Contains(paths, p => p.Replace('\\', '/').EndsWith("/repo/ReportLib/code/ReportConfiguration/ConfigurationBase.cs"));
+        Assert.Contains(paths, p => p.Replace('\\', '/').EndsWith("/repo/ReportLib/Foo.designer.cs"));
+        // Wildcard + MSBuild-property includes are skipped (no literal path).
+        Assert.DoesNotContain(paths, p => p.Contains("*"));
+        Assert.DoesNotContain(paths, p => p.Contains("$("));
+        Assert.Equal(2, paths.Count);
+    }
+
+    [Fact]
     public void BuildSummaryProblem_null_when_none_excluded()
     {
         Assert.Null(CompileSetCoverage.BuildSummaryProblem(100, System.Array.Empty<string>(), $"{Sep}repo"));

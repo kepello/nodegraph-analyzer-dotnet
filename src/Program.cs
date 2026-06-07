@@ -109,6 +109,39 @@ static void RunOutput(AnalyzerArgs args, AnalyzerConfig config, bool msbuildAvai
         projectMap = MSBuildIntegration.LoadProjects(csprojFiles, projectProblems, loadedProjectDirs);
         Console.Error.WriteLine($".NET analyzer: MSBuildWorkspace loaded {projectMap.Count} document(s) from {csprojFiles.Count} project(s); {projectProblems.Count} problem(s).");
     }
+    // Case-insensitive membership view of the compiled document set (Fathom row
+    // dotnet-csproj-compile-set-coverage 5.0.74). On a case-insensitive
+    // filesystem (macOS/Windows) MSBuildWorkspace stores the csproj-declared
+    // <Compile> path while the analyzer's directory walk finds the on-disk path;
+    // when their CASE differs (`Foo.designer.cs` in the csproj vs the on-disk
+    // `Foo.Designer.cs`) the Ordinal projectMap lookup misses even though the
+    // file IS compiled. Excluding such a file would orphan its members (e.g. a
+    // partial's `InitializeComponent`) → unresolvable edges. So the exclusion
+    // gate treats a file as build-excluded ONLY when it's absent from Documents
+    // under this case-insensitive view too — i.e. genuinely not in <Compile>
+    // under any casing (an orphaned typed-DataSet). On Linux (case-sensitive fs)
+    // the comparer stays Ordinal: a case-mismatched <Compile> entry genuinely
+    // wouldn't compile there.
+    var pathComparer = OperatingSystem.IsLinux() ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase;
+    var compiledKeysCi = new HashSet<string>(projectMap.Keys, pathComparer);
+    // Backstop: the AUTHORITATIVE compiled set from each csproj's literal
+    // <Compile Include> items (Fathom row dotnet-csproj-compile-set-coverage
+    // 5.0.74). project.Documents drops files whose declared path differs from
+    // disk by case/separator/special-folder; the csproj XML does not. A file is
+    // build-excluded only when it's in NEITHER Documents (case-insensitive) NOR
+    // this set — i.e. genuinely not compiled on any platform.
+    var compiledFromCsproj = new HashSet<string>(pathComparer);
+    foreach (var csprojPath in csprojFiles)
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(csprojPath);
+            if (string.IsNullOrEmpty(dir)) continue;
+            foreach (var p in CompileSetCoverage.ParseCompiledFilePaths(File.ReadAllText(csprojPath), dir))
+                compiledFromCsproj.Add(p);
+        }
+        catch { /* unreadable csproj — Documents still backstops */ }
+    }
     foreach (var p in projectProblems)
     {
         Emit(new { type = "problem", problem = p });
@@ -213,11 +246,19 @@ static void RunOutput(AnalyzerArgs args, AnalyzerConfig config, bool msbuildAvai
                 treeForFile = projectEntry.SyntaxTree;
                 referencesFree = false;
             }
-            else if (CompileSetCoverage.IsUnderAnyProjectDir(filePath, loadedProjectDirs))
+            else if (CompileSetCoverage.IsUnderAnyProjectDir(filePath, loadedProjectDirs)
+                && !compiledKeysCi.Contains(filePath)
+                && !compiledFromCsproj.Contains(filePath))
             {
-                // Owned by a loaded project's directory but not in its compiled
-                // document set → the build excludes it (dead/generated/excluded
-                // code). Omit from the corpus; do NOT analyze references-free.
+                // Owned by a loaded project's directory and in NEITHER the
+                // compiled document set (case-insensitive) NOR any csproj's
+                // literal <Compile> set → the build excludes it on every platform
+                // (dead/generated/excluded code, e.g. an orphaned typed-DataSet).
+                // Omit from the corpus; do NOT analyze references-free. (A file
+                // compiled-but-dropped-from-Documents — case/separator/special-
+                // folder mismatch — is in the csproj <Compile> set, so it's NOT
+                // excluded; it falls through to references-free, preserving its
+                // members so their edges resolve.)
                 buildExcludedFiles.Add(filePath);
                 return;
             }

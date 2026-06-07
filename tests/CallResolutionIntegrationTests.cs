@@ -412,10 +412,15 @@ public class Writer {
                 "  <ItemGroup><Reference Include=\"System\" /></ItemGroup>\n" +
                 "  <ItemGroup>\n" +
                 "    <Compile Include=\"Live.cs\" />\n" +  // Dead.cs intentionally NOT listed
+                // Case-mismatched include: csproj says lowercase `cased.designer.cs`,
+                // disk is `Cased.Designer.cs`. The build compiles it (case-insensitive
+                // fs); it must NOT be build-excluded even though Documents may drop it.
+                "    <Compile Include=\"cased.designer.cs\" />\n" +
                 "  </ItemGroup>\n" +
                 "  <Import Project=\"$(MSBuildToolsPath)\\Microsoft.CSharp.targets\" />\n" +
                 "</Project>\n"),
             ("Live.cs", "public class Live { public void M() { } }"),
+            ("Cased.Designer.cs", "public class Cased { public void M() { } }"),
             ("Dead.cs", "public class Dead { public void M() { } }"));
         try
         {
@@ -424,8 +429,13 @@ public class Writer {
             var ids = artifactIds.Select(s => s.Replace('\\', '/')).ToList();
             // Sanity: the project loaded and Live.cs (in <Compile>) WAS analyzed.
             Assert.Contains(ids, s => s.EndsWith("/Live.cs"));
-            // Dead.cs (not in <Compile>) must be OMITTED — no artifact emitted.
+            // Dead.cs (not in <Compile> under any casing) must be OMITTED.
             Assert.DoesNotContain(ids, s => s.EndsWith("/Dead.cs"));
+            // Cased.Designer.cs IS in <Compile> (case-mismatched) → COMPILED →
+            // must NOT be excluded (regression: pre-fix, the Ordinal/Documents
+            // miss wrongly excluded it, orphaning its members → 402 dangling
+            // edges on EnvisionWeb). It's analyzed (project or references-free).
+            Assert.Contains(ids, s => s.EndsWith("/Cased.Designer.cs"));
             // And the omission is observable: a build-excluded warning fired.
             Assert.Contains(problems, p => p.Severity == "warning"
                 && p.Message.Contains("EXCLUDED from analysis")

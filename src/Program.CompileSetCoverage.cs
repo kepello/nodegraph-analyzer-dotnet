@@ -24,10 +24,42 @@
 /// </summary>
 
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 
 static class CompileSetCoverage
 {
+    static readonly Regex CompileInclude = new(
+        @"<Compile\s+Include\s*=\s*""([^""]+)""",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// The absolute, normalized paths of a csproj's literal <c>&lt;Compile
+    /// Include&gt;</c> items — the AUTHORITATIVE "what the build compiles" set.
+    /// MSBuildWorkspace's <c>project.Documents</c> is a lossy view (it drops
+    /// files whose declared path differs from disk by case, separator, or
+    /// special-folder quirks — `code\Foo.cs`, `App_code\Bar.cs`,
+    /// `Foo.designer.cs` vs `Foo.Designer.cs`), so the build-excluded decision
+    /// backstops Documents with this. Skips wildcard / MSBuild-property includes
+    /// (`*`, `$(...)`) — those are glob/SDK-style and already complete in
+    /// Documents. Relative `\`-separated includes are resolved against the csproj
+    /// directory. Fathom row dotnet-csproj-compile-set-coverage (5.0.74).
+    /// </summary>
+    public static IEnumerable<string> ParseCompiledFilePaths(string csprojContent, string csprojDir)
+    {
+        foreach (Match m in CompileInclude.Matches(csprojContent))
+        {
+            var raw = m.Groups[1].Value;
+            if (raw.Contains('*') || raw.Contains("$(")) continue; // glob/property — Documents covers it
+            var normalized = raw.Replace('\\', Path.DirectorySeparatorChar);
+            string abs;
+            try { abs = Path.GetFullPath(Path.Combine(csprojDir, normalized)); }
+            catch { continue; }
+            yield return abs;
+        }
+    }
+
     /// <summary>
     /// True iff <paramref name="filePath"/> sits under one of the loaded
     /// project directories (each passed WITH a trailing separator so a prefix
