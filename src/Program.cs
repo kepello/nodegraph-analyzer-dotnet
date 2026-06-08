@@ -1075,6 +1075,39 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
             element["documentationCoverage"] = false;
         }
 
+        // Language-conformance Group A8 — annotations / attributes (Fathom row
+        // dotnet-l0-attribute-emission 5.0.79; H1 of the 2026-06-07 context-
+        // sufficiency audit). Emit the attributes applied to this declaration so
+        // the orchestrator reads auth / ORM-mapping / service-contract /
+        // generated-provenance / test / serialization signal from facts, never
+        // by re-reading source. Expression-fallback args (anything not an A8
+        // primitive) surface a J1 limitation so the precision loss is observable
+        // (no-silent-degradation).
+        var annotationResult = AnnotationHelpers.Extract(node, semanticModel);
+        if (annotationResult != null)
+        {
+            if (annotationResult.Annotations.Count > 0)
+            {
+                element["annotations"] = annotationResult.Annotations;
+            }
+            foreach (var fb in annotationResult.Fallbacks)
+            {
+                limitationsAccumulator.Add(new Dictionary<string, object?>
+                {
+                    ["kind"] = "fallback-annotation-arg",
+                    ["severity"] = "minor",
+                    ["location"] = new Dictionary<string, object?>
+                    {
+                        ["file"] = filePath,
+                        ["startLine"] = fb.StartLine,
+                        ["endLine"] = fb.EndLine,
+                    },
+                    ["description"] = $"Annotation argument '{fb.Source}' could not be typed as an "
+                        + "A8 primitive; emitted as an `expression` fallback arg.",
+                });
+            }
+        }
+
         // Language-conformance Group E — entry-point detection.
         // Subset of E1 enum at v1 per operator decision: main / http-handler /
         // library-export / other / none. Aggressive E3 heuristic seed.
@@ -1578,7 +1611,7 @@ static object[] ExtractRelationships(
     // coupling) without masquerading as a resolvable phantom. Pre-fix these
     // shapes emitted only a generic `references` identifier edge, leaving
     // `calls == 0` and the (correct) stereotype rules at `unclassified`.
-    void AddExternal(string type, string subtype, string rawName)
+    void AddExternal(string type, string subtype, string rawName, string provenance)
     {
         var canonical = Canonicalize(rawName);
         if (string.IsNullOrEmpty(canonical)) return;
@@ -1586,7 +1619,16 @@ static object[] ExtractRelationships(
         if (seen.Contains(subtypeKey)) return;
         seen.Add(subtypeKey);
         seen.Add($"{type}:{canonical}");
-        relationships.Add(new { type, subtype, targetName = canonical, metadata = new { external = true } });
+        // metadata.resolutionProvenance (Fathom 5.0.80 / H2): the target is
+        // observably non-in-source — tag WHY so a library boundary is
+        // distinguishable from an analyzer bug without a source-read.
+        relationships.Add(new
+        {
+            type,
+            subtype,
+            targetName = canonical,
+            metadata = new { external = true, resolutionProvenance = provenance },
+        });
     }
 
     // Project-level resolver: try to resolve a syntax node to a cross-file
@@ -1748,7 +1790,7 @@ static object[] ExtractRelationships(
     // for the external-member `calls` edge. Returns null for in-source methods
     // (handled by ResolveCallTarget), unresolved callees, and non-method
     // symbols — keeping the external edge strictly to confirmed external calls.
-    string? ResolveExternalCallName(SyntaxNode callee)
+    (string Name, string Provenance)? ResolveExternalCallName(SyntaxNode callee)
     {
         try
         {
@@ -1757,7 +1799,8 @@ static object[] ExtractRelationships(
             if (symbol is not IMethodSymbol method) return null;
             if (method.DeclaringSyntaxReferences.Length > 0) return null; // in-source → not external
             var owner = method.ContainingType?.ToDisplayString();
-            return string.IsNullOrEmpty(owner) ? method.Name : $"{owner}.{method.Name}";
+            var name = string.IsNullOrEmpty(owner) ? method.Name : $"{owner}.{method.Name}";
+            return (name, ProvenanceHelpers.ClassifyExternalCall(method));
         }
         catch
         {
@@ -1771,7 +1814,7 @@ static object[] ExtractRelationships(
     // external property-write `calls` edge. Returns null for in-source
     // properties (handled by ResolveAccessorTarget), plain fields, and
     // unresolved accesses.
-    string? ResolveExternalPropertyName(SyntaxNode memberAccess)
+    (string Name, string Provenance)? ResolveExternalPropertyName(SyntaxNode memberAccess)
     {
         try
         {
@@ -1781,7 +1824,8 @@ static object[] ExtractRelationships(
             if (prop.DeclaringSyntaxReferences.Length > 0) return null; // in-source → not external
             var owner = prop.ContainingType?.ToDisplayString();
             var name = prop.IsIndexer ? "indexer" : prop.Name;
-            return string.IsNullOrEmpty(owner) ? name : $"{owner}.{name}";
+            var label = string.IsNullOrEmpty(owner) ? name : $"{owner}.{name}";
+            return (label, ProvenanceHelpers.ClassifyExternalProperty(prop));
         }
         catch
         {
@@ -1861,13 +1905,14 @@ static object[] ExtractRelationships(
             {
                 AddWithTargetRef("calls", "direct", callTarget.Value.QualifiedRawName, callTarget.Value.FilePath);
             }
-            else if (ResolveExternalCallName(invocation.Expression) is { } externalCallName)
+            else if (ResolveExternalCallName(invocation.Expression) is { } externalCall)
             {
                 // Resolves to an EXTERNAL method (BCL / library) — emit the
                 // behavioral `calls` edge tagged external so chained / qualified
                 // external calls (`this.Rows.Add(x)`) are counted, not dropped
-                // to a no-op. Fathom row 5.0.75.
-                AddExternal("calls", "external", externalCallName);
+                // to a no-op (Fathom 5.0.75), carrying resolutionProvenance
+                // (Fathom 5.0.80 / H2).
+                AddExternal("calls", "external", externalCall.Name, externalCall.Provenance);
             }
             else if (allNames.Contains(calledName))
             {
@@ -2148,7 +2193,7 @@ static object[] ExtractRelationships(
                 accessorTarget.Value.QualifiedRawName,
                 accessorTarget.Value.FilePath);
         }
-        else if (isWrite && ResolveExternalPropertyName(access) is { } externalPropName)
+        else if (isWrite && ResolveExternalPropertyName(access) is { } externalProp)
         {
             // External property / indexer WRITE (`Session[k]=v`, `ctrl.Text=x`)
             // — emit the behavioral `calls`/`property-set` edge tagged external
@@ -2156,7 +2201,9 @@ static object[] ExtractRelationships(
             // reads of external properties are far higher-volume and out of
             // scope for the determined method-`unclassified` cases (Fathom row
             // 5.0.75; external-read emission is a noted potential follow-on).
-            AddExternal("calls", "property-set", externalPropName);
+            // resolutionProvenance distinguishes a string-keyed indexer
+            // (`dynamic`) from a named external property (Fathom 5.0.80 / H2).
+            AddExternal("calls", "property-set", externalProp.Name, externalProp.Provenance);
         }
     }
 

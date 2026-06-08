@@ -2,6 +2,46 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.42.0] — 2026-06-07
+
+**Edge `resolutionProvenance`** (Fathom row `edge-resolution-provenance` 5.0.80; H2 of the 2026-06-07 context-sufficiency audit). An external edge previously carried only `metadata.external` (boolean) — the five distinct non-in-source cases were indistinguishable, so "honest library boundary vs analyzer bug" stayed a source-read (the recurring 5.0.75-vs-5.0.76 "emits only references" ambiguity). External edges now carry `metadata.resolutionProvenance`; the engine persists it via the same edge-metadata passthrough as `external` (no substrate change).
+
+### Added
+
+- `metadata.resolutionProvenance` on external `calls`/property-set edges. Values emitted: **`external-library`** (resolves to a referenced-assembly symbol — BCL/NuGet, e.g. `this.Rows.Add(x)` → System.Data) and **`dynamic`** (a string/value-keyed indexer with no static member target — `Session[k]=v`, `ViewState[k]`, dictionary indexers — the irreducible reflective tail). In-source resolved edges stay UNTAGGED (absence == `in-source`).
+- `ProvenanceHelpers` (`Program.Provenance.cs`) — pure classifier from the resolved Roslyn symbol.
+
+### Scoped out (documented, tracked follow-ons)
+
+- `generated-companion` — non-ingested generated/markup companions (WebForms `.ascx` control fields) don't resolve today; they land with H4 (interactionSurface). Targets in INGESTED generated files (typed-DataSet `.Designer.cs`) are in-source; their generated-ness is answerable from H1's `[GeneratedCode]` annotation.
+- `framework-injected` — needs base-chain analysis; external framework members default to `external-library`.
+- `resolver-gap` — already surfaced file-level by the references-free Limitation (5.0.72); a per-edge tag is redundant pending need.
+
+### Tests
+
+- 3 in-process classifier unit tests + 3 spawn wire tests (external-library call, dynamic indexer vs named external property, in-source-stays-untagged invariant) — TDD red confirmed by running the wire tests against the pre-wiring DLL. 2 engine round-trip tests (`edge-provenance-ingest.test.ts`, both backends). Analyzer 182 + engine 556 pass.
+
+## [0.41.0] — 2026-06-07
+
+**Attributes/annotations (conformance group A8) are now EMITTED** (Fathom row `dotnet-l0-attribute-emission` 5.0.79; H1 of the 2026-06-07 context-sufficiency audit). The `annotations` wire facet was DEFINED in the protocol but emitted by no analyzer (deferred to a "Stage 2" that never landed). In .NET, attributes carry the semantic signal for nearly every non-UI boundary — auth (`[Authorize]`), ORM mapping (`[Table]`/`[Column]`/`[Key]`), service contracts (`[WebMethod]`/`[ServiceContract]`/`[OperationContract]`), generated-code provenance (`[GeneratedCode]`/`[DebuggerNonUserCode]`), test membership (`[Fact]`/`[TestMethod]`), serialization (`[DataContract]`/`[Serializable]`) — so their absence forced a source-read corpus-wide. The engine persists the facet unchanged via the existing deny-list passthrough (`collectConformanceFacets`); no substrate change required.
+
+### Added
+
+- `AnnotationHelpers.Extract` (`Program.Annotations.cs`) emits `annotations` on every declaration carrying attributes (types/methods/properties/fields/events/ctors/operators/enum-members/accessors/parameters). Each annotation has `name` (short, as-written), `qualifiedName` (resolved attribute type FQN, omitted when unresolvable — never guessed), positional `args`, and `namedArgs`.
+- A8 Level-2 typed arg primitives: `string` / `number` (incl. negative literals) / `boolean` / `identifier` (dotted member-access permitted). Anything else takes the `expression` escape hatch.
+
+### No silent degradation
+
+- An `expression`-fallback arg emits a J1 limitation (`kind: "fallback-annotation-arg"`) so the precision loss is observable, never silent.
+
+### Scoped out (tracked follow-on)
+
+- The `type-ref` arg kind and its companion `references` edge (`subtype: "annotation-arg"`) for `typeof(T)` args: currently take the honest `expression` fallback (+ limitation), not a silent drop.
+
+### Tests
+
+- 16 in-process unit tests over `AnnotationHelpers` — one fixture per attribute CATEGORY (auth/ORM/service-contract/generated/test/serialization) + the full arg-kind matrix + named-args + bare-attribute + expression-fallback/limitation + qualifiedName resolution (TDD red confirmed: 16 fail on the stub, pass on the impl). 1 end-to-end NDJSON wire test (facet + limitation flow through the built analyzer). 2 engine round-trip tests (`annotations-ingest.test.ts`, both backends). Analyzer 176 + engine 554 pass.
+
 ## [0.40.0] — 2026-06-07
 
 Cross-file partial-class `callsMethod` edges now carry a **cross-file `targetRef`** (Fathom row `dotnet-msbuildworkspace-documents-completeness` 5.0.77 — the partial-`callsMethod`-targetRef root). The intra-class member-index fix (`@0.31.0`) made a partial type's cross-file calls EMIT — a report constructor in `Foo.cs` calling `InitializeComponent` declared in `Foo.Designer.cs` — but the edge's bare `class/member` targetName was resolved by the overlay WITHIN the source artifact (`{Foo.cs}#…`), so it couldn't bind to the member's element in the OTHER partial file (`{Foo.Designer.cs}#…`) → the edge dangled. Latent (the edges emitted+dangled since 0.31.0) until `fathom analyze`'s strict-edge-check (enabled for C# `@fathom-cli 4.36.0`, 2026-06-01) surfaced it: **529 unresolvable internal edges aborted analysis of EnvisionWeb** (every report partial's `ctor → InitializeComponent`). The MCP `ensureWarm` measure path doesn't run the strict-check, so the 326→224 / →107 measures succeeded throughout.
