@@ -750,6 +750,33 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
                         && memberFileByName.TryGetValue(memberKey, out var memberFile)
                         && canonicalizeFilePath(memberFile) != currentFileCanon)
                     {
+                        // Members declared in a synthetic generated-companion
+                        // partial (WSP control fields, Fathom 5.0.87) have NO
+                        // ingested element — a crossFileRef to the companion
+                        // path would dangle (the 5.0.77 failure mode). Emit
+                        // the established external shape instead, tagged
+                        // generated-companion (H2): observably non-in-source,
+                        // strict-check exempt, still feeding the behavioral
+                        // counts the stereotype rules read.
+                        if (WebFormsCompanion.IsCompanionPath(memberFile))
+                        {
+                            if (subtype is null)
+                                rels.Add(new
+                                {
+                                    type = edgeType,
+                                    targetName = qualifiedTarget,
+                                    metadata = new { external = true, resolutionProvenance = ProvenanceHelpers.GeneratedCompanion },
+                                });
+                            else
+                                rels.Add(new
+                                {
+                                    type = edgeType,
+                                    subtype,
+                                    targetName = qualifiedTarget,
+                                    metadata = new { external = true, resolutionProvenance = ProvenanceHelpers.GeneratedCompanion },
+                                });
+                            continue;
+                        }
                         crossFileRef = MakeNaturalKey(canonicalizeFilePath(memberFile), qualifiedTarget);
                     }
                     if (crossFileRef is null)
@@ -1645,9 +1672,12 @@ static object[] ExtractRelationships(
             // Follow aliases (e.g., `using Foo = SomeNs.SomeType`) to the
             // underlying declaration.
             if (symbol is IAliasSymbol alias) symbol = alias.Target;
-            var declRefs = symbol.DeclaringSyntaxReferences;
-            if (declRefs.Length == 0) return null;
-            var declFilePath = canonicalizeFilePath(declRefs[0].SyntaxTree.FilePath);
+            // Synthetic generated-companion declarations (5.0.87) are
+            // compilation-only — a targetRef to them would dangle. Resolve to
+            // the first REAL declaration, or nothing.
+            var declRef = WebFormsCompanion.FirstNonCompanionDeclRef(symbol.DeclaringSyntaxReferences);
+            if (declRef == null) return null;
+            var declFilePath = canonicalizeFilePath(declRef.SyntaxTree.FilePath);
             if (string.IsNullOrEmpty(declFilePath)) return null;
             if (declFilePath == currentFilePath) return null;
             return declFilePath;
@@ -1670,9 +1700,11 @@ static object[] ExtractRelationships(
             var symbolInfo = semanticModel.GetSymbolInfo(callee);
             var symbol = symbolInfo.Symbol ?? symbolInfo.CandidateSymbols.FirstOrDefault();
             if (symbol is not IMethodSymbol method) return null;
-            var declRefs = method.DeclaringSyntaxReferences;
-            if (declRefs.Length == 0) return null;
-            var declFilePath = canonicalizeFilePath(declRefs[0].SyntaxTree.FilePath);
+            // Companion-declared targets can't take a targetRef (5.0.87) —
+            // companions declare only fields, so this is defensive here.
+            var declRef = WebFormsCompanion.FirstNonCompanionDeclRef(method.DeclaringSyntaxReferences);
+            if (declRef == null) return null;
+            var declFilePath = canonicalizeFilePath(declRef.SyntaxTree.FilePath);
             if (string.IsNullOrEmpty(declFilePath)) return null;
             // Build the qualified raw name from the resolved declaration's
             // SYNTAX using the exact functions that build the element natural
@@ -1686,7 +1718,7 @@ static object[] ExtractRelationships(
             // `calls` edges (Fathom row dotnet-l0-internal-call-resolution
             // 5.0.68.1). Returns null when the declaration isn't a named
             // member shape (kept conservative — no guessed target).
-            var declNode = declRefs[0].GetSyntax();
+            var declNode = declRef.GetSyntax();
             var declName = GetDeclarationName(declNode);
             if (declName == null) return null;
             var qualifiedRaw = GetQualifiedRawName(declNode, declName) + NamingHelpers.GetParamSignature(declNode);
@@ -1715,11 +1747,14 @@ static object[] ExtractRelationships(
             var symbol = symbolInfo.Symbol ?? symbolInfo.CandidateSymbols.FirstOrDefault();
             if (symbol is IAliasSymbol alias) symbol = alias.Target;
             if (symbol is not INamedTypeSymbol named) return null;
-            var declRefs = named.DeclaringSyntaxReferences;
-            if (declRefs.Length == 0) return null;
-            var declFilePath = canonicalizeFilePath(declRefs[0].SyntaxTree.FilePath);
+            // A WSP codebehind class is partial across its real file AND the
+            // synthetic companion (5.0.87) — resolve to the REAL declaration
+            // so the targetRef binds to an ingested artifact.
+            var declRef = WebFormsCompanion.FirstNonCompanionDeclRef(named.DeclaringSyntaxReferences);
+            if (declRef == null) return null;
+            var declFilePath = canonicalizeFilePath(declRef.SyntaxTree.FilePath);
             if (string.IsNullOrEmpty(declFilePath)) return null;
-            var declNode = declRefs[0].GetSyntax();
+            var declNode = declRef.GetSyntax();
             var declName = GetDeclarationName(declNode);
             if (declName == null) return null;
             // Types carry no parameter signature — the qualified raw name is
@@ -1749,11 +1784,12 @@ static object[] ExtractRelationships(
             var symbolInfo = semanticModel.GetSymbolInfo(memberAccess);
             var symbol = symbolInfo.Symbol ?? symbolInfo.CandidateSymbols.FirstOrDefault();
             if (symbol is not IPropertySymbol prop) return null; // properties + indexers only (not fields)
-            var declRefs = prop.DeclaringSyntaxReferences;
-            if (declRefs.Length == 0) return null; // external / BCL → no edge
-            var declFilePath = canonicalizeFilePath(declRefs[0].SyntaxTree.FilePath);
+            // Companions declare only fields — defensive guard (5.0.87).
+            var declRef = WebFormsCompanion.FirstNonCompanionDeclRef(prop.DeclaringSyntaxReferences);
+            if (declRef == null) return null; // external / BCL / companion-only → no edge
+            var declFilePath = canonicalizeFilePath(declRef.SyntaxTree.FilePath);
             if (string.IsNullOrEmpty(declFilePath)) return null;
-            var declNode = declRefs[0].GetSyntax();
+            var declNode = declRef.GetSyntax();
             var declName = GetDeclarationName(declNode);
             if (declName == null) return null;
             var baseQualified = GetQualifiedRawName(declNode, declName);

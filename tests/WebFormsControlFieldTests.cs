@@ -26,6 +26,10 @@ namespace NodegraphAnalyzerDotnet.Tests;
 /// WSP compilation — after which Variant A here proves the bindings emit.
 /// These tests remain the regression pins for that fix's two halves
 /// (declaration present → bindings emit; type unresolved → honest drop).
+/// The synthesis itself SHIPPED with 5.0.87 (Program.WebFormsMarkup.cs); its
+/// end-to-end pins live in WebFormsCompanionIntegrationTests. These two
+/// variants keep pinning the Web APPLICATION Project shape (real
+/// `.designer.cs` on disk), which the synthesis must never disturb.
 /// </summary>
 public class WebFormsControlFieldTests
 {
