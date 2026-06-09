@@ -4,23 +4,28 @@ using System.Text.Json;
 namespace NodegraphAnalyzerDotnet.Tests;
 
 /// <summary>
-/// Pins the diagnosis of the 107 WebForms residual (H4b / Fathom 2026-06-07
-/// sufficiency audit). A page handler accesses control fields declared in its
-/// `.designer.cs` partial (`lbl.Text = "x"`, `cb.Items.Add(...)`).
+/// Pins TWO mechanical facts behind the 107 WebForms residual (H4b / Fathom
+/// 2026-06-07 sufficiency audit). A page handler accesses control fields
+/// declared in its `.designer.cs` partial (`lbl.Text = "x"`, `cb.Items.Add(...)`).
 ///
-/// Finding (verify-first, 2026-06-07): the residual is NOT a structural /
-/// cross-file-partial gap — that path resolves (5.0.77). It is the control
-/// field TYPES not resolving (`System.Web.UI.WebControls.*` / Telerik), exactly
-/// like 5.0.76.a's System.Data bare-GAC refs.
-///
-///   Variant A (control types in-source) → the control bindings RESOLVE:
+///   Variant A (field declared + control type resolves) → the bindings RESOLVE:
 ///     accessesField to the field + calls/property-set to the control property.
-///   Variant B (control types undefined, mimicking System.Web unresolved) →
-///     the field access still resolves, but the member-access edges DROP
-///     (the field type is an error symbol).
+///     (Cross-file partial resolution holds — NOT a 5.0.77-class gap.)
+///   Variant B (field declared, control type an error symbol) → the field
+///     access still resolves, but the member-access edges DROP.
 ///
-/// So the fix family is framework-reference resolution (resolve System.Web like
-/// 5.0.76.a resolved System.Data), not a new structural capability.
+/// DIAGNOSIS CORRECTED 2026-06-08 (deeper verify-first on the real corpus —
+/// see work row `dotnet-system-web-framework-ref-resolution` 5.0.87): on
+/// EnvisionWeb the controls live in `EnvisionAnywhere.com`, a WEB SITE PROJECT
+/// with NO `.designer.cs` at all (390 `.ascx`, 0 designer files) — the field
+/// (`lbl`) is declared ONLY in the `.ascx` markup, so the codebehind identifier
+/// is UNDECLARED and the access never reaches Variant B's situation. System.Web
+/// itself is present (the WAP references it; the WSP loader adds the framework
+/// pack). The real fix is generated-companion control-field SYNTHESIS: parse
+/// the `.ascx` markup, synthesize the field declarations, inject them into the
+/// WSP compilation — after which Variant A here proves the bindings emit.
+/// These tests remain the regression pins for that fix's two halves
+/// (declaration present → bindings emit; type unresolved → honest drop).
 /// </summary>
 public class WebFormsControlFieldTests
 {
