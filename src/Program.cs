@@ -1615,17 +1615,6 @@ static object[] ExtractRelationships(
     var relationships = new List<object>();
     var seen = new HashSet<string>();
 
-    void Add(string type, string subtype, string rawName)
-    {
-        var canonical = Canonicalize(rawName);
-        if (string.IsNullOrEmpty(canonical)) return;
-        var subtypeKey = $"{subtype}:{canonical}";
-        if (seen.Contains(subtypeKey)) return;
-        seen.Add(subtypeKey);
-        seen.Add($"{type}:{canonical}");
-        relationships.Add(new { type, subtype, targetName = canonical });
-    }
-
     // Variant that emits targetRef when the target's file is resolvable
     // cross-file. Uses CanonicalizePath (slash-preserving) so qualified
     // names like `Runner/Run(ParsedArgs)` canonicalize to `runner/run-parsedargs`
@@ -1782,6 +1771,79 @@ static object[] ExtractRelationships(
             // the canonical element key for the class / struct / interface.
             var qualifiedRaw = GetQualifiedRawName(declNode, declName);
             return (declFilePath, qualifiedRaw);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    // Resolve an identifier reference to its declaring workspace element — the
+    // qualified raw name (class-qualified + param-signatured for methods) plus
+    // the declaring file path, for use by the `references/identifier` path.
+    // Returns null for external/BCL symbols (no DeclaringSyntaxReferences) so
+    // the caller emits no edge rather than a phantom bare name. Covers all
+    // member kinds: types (INamedTypeSymbol), methods (IMethodSymbol), and
+    // non-callable members (IPropertySymbol, IFieldSymbol, IEventSymbol).
+    // Unlike ResolveTargetFile the returned FilePath is always the real
+    // declaring path — including same-file — because .NET natural keys are
+    // TYPE-QUALIFIED and a bare member name does not bind even within its own
+    // artifact (Fathom row dotnet-l0-ref-qualification 5.0.93).
+    (string FilePath, string QualifiedRawName)? ResolveIdentifierTarget(IdentifierNameSyntax idNode)
+    {
+        try
+        {
+            var symbolInfo = semanticModel.GetSymbolInfo(idNode);
+            var symbol = symbolInfo.Symbol ?? symbolInfo.CandidateSymbols.FirstOrDefault();
+            if (symbol == null) return null;
+            if (symbol is IAliasSymbol alias) symbol = alias.Target;
+
+            // Types: same logic as ResolveTypeTarget — qualify to the type's
+            // full declaration path (handles nested types via GetQualifiedRawName).
+            if (symbol is INamedTypeSymbol namedType)
+            {
+                var declRef = WebFormsCompanion.FirstNonCompanionDeclRef(namedType.DeclaringSyntaxReferences);
+                if (declRef == null) return null;
+                var declFilePath = canonicalizeFilePath(declRef.SyntaxTree.FilePath);
+                if (string.IsNullOrEmpty(declFilePath)) return null;
+                var declNode = declRef.GetSyntax();
+                var declName = GetDeclarationName(declNode);
+                if (declName == null) return null;
+                return (declFilePath, GetQualifiedRawName(declNode, declName));
+            }
+
+            // Methods: same logic as ResolveCallTarget — qualify + add param
+            // signature so the target matches the method element's natural key.
+            if (symbol is IMethodSymbol method)
+            {
+                var declRef = WebFormsCompanion.FirstNonCompanionDeclRef(method.DeclaringSyntaxReferences);
+                if (declRef == null) return null;
+                var declFilePath = canonicalizeFilePath(declRef.SyntaxTree.FilePath);
+                if (string.IsNullOrEmpty(declFilePath)) return null;
+                var declNode = declRef.GetSyntax();
+                var declName = GetDeclarationName(declNode);
+                if (declName == null) return null;
+                return (declFilePath,
+                    GetQualifiedRawName(declNode, declName) + NamingHelpers.GetParamSignature(declNode));
+            }
+
+            // Non-callable members (property, field, event) — qualify without
+            // param signature; the natural key is `Class/member`.
+            if (symbol is IPropertySymbol or IFieldSymbol or IEventSymbol)
+            {
+                var declRef = WebFormsCompanion.FirstNonCompanionDeclRef(symbol.DeclaringSyntaxReferences);
+                if (declRef == null) return null;
+                var declFilePath = canonicalizeFilePath(declRef.SyntaxTree.FilePath);
+                if (string.IsNullOrEmpty(declFilePath)) return null;
+                var declNode = declRef.GetSyntax();
+                var declName = GetDeclarationName(declNode);
+                if (declName == null) return null;
+                return (declFilePath, GetQualifiedRawName(declNode, declName));
+            }
+
+            // Other symbol kinds (namespace, local variable, parameter, …) —
+            // not workspace elements; emit no edge.
+            return null;
         }
         catch
         {
@@ -2158,6 +2220,12 @@ static object[] ExtractRelationships(
         }
     }
 
+    // Generic-constraint references: resolve `where T : IRepo` the same way
+    // type-position sites (return-type / parameter-type) do — ResolveTargetFile
+    // for the cross-file targetRef. Workspace-resolved (same-file or cross-file)
+    // → AddWithTargetRef; external (e.g. `IDisposable`) → null → no edge
+    // (Fathom row dotnet-l0-ref-qualification 5.0.93). Pre-fix the allNames
+    // gate missed cross-file types entirely and emitted bare for same-file ones.
     {
         IEnumerable<TypeParameterConstraintClauseSyntax> constraintClauses = node switch
         {
@@ -2169,9 +2237,15 @@ static object[] ExtractRelationships(
         {
             foreach (var constraint in clause.Constraints.OfType<TypeConstraintSyntax>())
             {
-                var constraintName = constraint.Type.ToString().Split('<')[0].Split('.').Last();
-                if (allNames.Contains(constraintName) && constraintName != GetDeclarationName(node))
-                    Add("references", "generic-constraint", constraintName);
+                var constraintType = constraint.Type;
+                var constraintName = constraintType.ToString().Split('<')[0].Split('.').Last();
+                if (constraintName == GetDeclarationName(node)) continue;
+                var constraintTargetFile = ResolveTargetFile(constraintType);
+                // constraintTargetFile == null means either same-file or external.
+                // allNames check disambiguates: same-file workspace types are in
+                // allNames; external types are not (BCL/library not walked).
+                if (constraintTargetFile != null || allNames.Contains(constraintName))
+                    AddWithTargetRef("references", "generic-constraint", constraintName, constraintTargetFile);
             }
         }
     }
@@ -2210,19 +2284,48 @@ static object[] ExtractRelationships(
         }
     }
 
+    // Identifier references: resolve each identifier via the semantic model to
+    // its qualified raw name so the emitted edge binds to the element's actual
+    // natural key (Fathom row dotnet-l0-ref-qualification 5.0.93).
+    // .NET natural keys are TYPE-QUALIFIED (`class/member(-params)`) — a bare
+    // member name does not bind even within the same artifact, so every
+    // workspace-source identifier carries a targetRef to the qualified element
+    // (including same-file). External/BCL identifiers have no declaring syntax
+    // and emit no edge (no phantom bare-name target the substrate can't resolve).
     foreach (var id in node.DescendantNodes().OfType<IdentifierNameSyntax>())
     {
         var idName = id.Identifier.Text;
-        if (allNames.Contains(idName) && idName != GetDeclarationName(node))
-        {
-            var canonical = Canonicalize(idName);
-            if (string.IsNullOrEmpty(canonical)) continue;
-            if (seen.Contains($"inherits:{canonical}") || seen.Contains($"contains:{canonical}")
-                || seen.Contains($"uses:{canonical}") || seen.Contains($"calls:{canonical}")
-                || seen.Contains($"references:{canonical}")) continue;
-            seen.Add($"references:{canonical}");
-            relationships.Add(new { type = "references", subtype = "identifier", targetName = canonical });
-        }
+        if (idName == GetDeclarationName(node)) continue;
+        // Skip identifiers that sit in a type-position already handled by a
+        // higher-specificity path (return-type, parameter-type, generic-constraint,
+        // base-type). Those paths resolve via ResolveTargetFile + AddWithTargetRef;
+        // re-processing them here would produce duplicates or — worse — a bare
+        // identifier edge that shadows the qualified one.
+        if (id.Parent is TypeConstraintSyntax) continue;
+        if (id.Parent is SimpleBaseTypeSyntax) continue;
+
+        var idTarget = ResolveIdentifierTarget(id);
+        if (idTarget == null) continue; // external / unresolvable → no edge
+
+        // Use CanonicalizePath for the qualified name so `Class/Method(int)`
+        // becomes `class/method-int`, matching the element's canonical key.
+        var canonicalQualified = CanonicalizePath(idTarget.Value.QualifiedRawName);
+        if (string.IsNullOrEmpty(canonicalQualified)) continue;
+        // Suppress if already captured by a higher-specificity edge (calls,
+        // contains, inherits, implements, overrides, return-type, etc.).
+        if (seen.Contains($"inherits:{canonicalQualified}") || seen.Contains($"contains:{canonicalQualified}")
+            || seen.Contains($"uses:{canonicalQualified}") || seen.Contains($"calls:{canonicalQualified}")
+            || seen.Contains($"references:{canonicalQualified}")) continue;
+        // Also suppress via the unqualified canonical (guards the old
+        // seen-key form used by base-type / return-type / parameter-type
+        // paths that call Canonicalize rather than CanonicalizePath).
+        var canonicalBare = Canonicalize(idName);
+        if (!string.IsNullOrEmpty(canonicalBare)
+            && (seen.Contains($"inherits:{canonicalBare}") || seen.Contains($"contains:{canonicalBare}")
+                || seen.Contains($"uses:{canonicalBare}") || seen.Contains($"calls:{canonicalBare}")
+                || seen.Contains($"references:{canonicalBare}"))) continue;
+
+        AddWithTargetRef("references", "identifier", idTarget.Value.QualifiedRawName, idTarget.Value.FilePath);
     }
 
     // Property / indexer access → `calls` to the accessor element. C# property

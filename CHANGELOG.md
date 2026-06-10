@@ -2,6 +2,23 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.45.0] — 2026-06-10
+
+**Reference qualification — bare `references/identifier` and `references/generic-constraint` edges eliminated** (Fathom row `dotnet-l0-ref-qualification` 5.0.93). The A2 census found C# had a ~45.8% ambiguous-tail rate on `references` edges — tails resolving to bare member names (`run`, `process`, `value`) that the substrate tail-matcher could mis-bind, since .NET natural keys are TYPE-QUALIFIED (`runner/run-parsedargs`). Same-file members don't bind bare even within their own artifact. Two emission sites replaced with semantic-model resolution:
+
+### Fixed
+
+- **Identifier references** (`references/identifier`, ~83-93 bare edges per corpus file): the identifier scan now calls `ResolveIdentifierTarget` — a new resolver modelled after `ResolveCallTarget`/`ResolveTypeTarget` — for each `IdentifierNameSyntax`. Workspace-resolved symbols (types, methods, properties, fields, events) emit with a qualified targetRef (`MakeNaturalKey(file, qualifiedRawName)`) including same-file symbols. External/BCL symbols (no `DeclaringSyntaxReferences`) emit no edge — no phantom bare target the substrate can't resolve. The unused `Add` helper (previously the only caller for generic-constraint) is removed.
+- **Generic-constraint references** (`references/generic-constraint`): replaced `allNames.Contains` guard + bare `Add(...)` with `ResolveTargetFile(constraint.Type)` + `AddWithTargetRef` — the same two-step pattern the `return-type`/`parameter-type` paths use. Cross-file workspace constraints now get a targetRef they were previously missing entirely; external constraints (e.g. `IDisposable`) emit no edge.
+
+### No migration
+
+Pre-prod — delete `.fathom/graph.db` and re-analyze to refresh the graph. Bare `references` edges in existing graphs are not back-filled; the new qualified edges appear on next analysis.
+
+### Tests
+
+- 6 new spawn-based regression tests (`RefQualificationTests`) — one per fixture category: C1 (cross-file identifier → no bare edge), C2 (same-file method identifier → qualified targetRef, no bare), C3 (external BCL symbol → no edge), C4 (generic constraint on cross-file workspace type → qualified targetRef), C5 (generic constraint on external type → no edge), F6 (two files with same-named class + same-method → calls edge carries file-qualified targetRef). TDD: C2 and C4 were red on the pre-fix DLL; all 6 green post-fix. Analyzer 215 pass (was 209).
+
 ## [0.44.0] — 2026-06-09
 
 **`controlType` on generated-companion field edges** (Fathom row `interaction-surface-facet` 5.0.82 — the H4 enrichment's analyzer half). The synthesized companion partial is the only place a markup control field's TYPE is knowable; the `accessesField` edge now carries `metadata.controlType` (the field's declared FQN, `global::` stripped) so the engine's `interactionSurface` can derive `controlKind` (button / label / grid / …) without a source or markup read.
