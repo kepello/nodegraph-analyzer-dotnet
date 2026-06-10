@@ -2,6 +2,10 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.44.0] — 2026-06-09
+
+**`controlType` on generated-companion field edges** (Fathom row `interaction-surface-facet` 5.0.82 — the H4 enrichment's analyzer half). The synthesized companion partial is the only place a markup control field's TYPE is knowable; the `accessesField` edge now carries `metadata.controlType` (the field's declared FQN, `global::` stripped) so the engine's `interactionSurface` can derive `controlKind` (button / label / grid / …) without a source or markup read.
+
 ## [0.43.0] — 2026-06-09
 
 **Web Site Project control-field SYNTHESIS** (Fathom row `dotnet-system-web-framework-ref-resolution` 5.0.87 — the id is a misnomer kept per the no-rename rule; the root is NOT System.Web references). WSPs have no `.designer.cs` — control fields (`lbl`, `cb`, `ReportTitle`) are declared ONLY in the `.ascx/.aspx/.master` markup (ASP.NET generates the partial-class fields at runtime), so to the analyzer the codebehind identifier was UNDECLARED and every control binding (`lbl.Text=`, `cb.Items.Add`, `ReportTitle.ReportTitle=`) dropped — the EnvisionWeb 107 method-`unclassified` residual. The analyzer now does what the ASP.NET page compiler does, statically.

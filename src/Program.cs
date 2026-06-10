@@ -690,9 +690,16 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
                 var partialDecls = typeDecls is { Count: > 0 }
                     ? typeDecls
                     : new List<TypeDeclarationSyntax> { containingType };
+                // Companion-declared control-field TYPES (Fathom 5.0.82): the
+                // synthesized partial is the only place the field's control
+                // type is knowable; stamp it onto the generated-companion edge
+                // so the engine's interactionSurface can derive controlKind
+                // without a source/markup read.
+                var companionFieldTypes = new Dictionary<string, string>(StringComparer.Ordinal);
                 foreach (var decl in partialDecls)
                 {
                     var declFile = decl.SyntaxTree.FilePath;
+                    var isCompanionDecl = WebFormsCompanion.IsCompanionPath(declFile);
                     void RegisterMember(string memberName)
                     {
                         var key = Canonicalize(memberName);
@@ -711,7 +718,17 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
                             case PropertyDeclarationSyntax pd3: RegisterMember(pd3.Identifier.Text); break;
                             case EventDeclarationSyntax ed3: RegisterMember(ed3.Identifier.Text); break;
                             case FieldDeclarationSyntax fd3:
-                                foreach (var v in fd3.Declaration.Variables) RegisterMember(v.Identifier.Text);
+                                foreach (var v in fd3.Declaration.Variables)
+                                {
+                                    RegisterMember(v.Identifier.Text);
+                                    if (isCompanionDecl)
+                                    {
+                                        var typeText = fd3.Declaration.Type.ToString();
+                                        if (typeText.StartsWith("global::", StringComparison.Ordinal))
+                                            typeText = typeText.Substring("global::".Length);
+                                        companionFieldTypes[Canonicalize(v.Identifier.Text)] = typeText;
+                                    }
+                                }
                                 break;
                             case EventFieldDeclarationSyntax efd3:
                                 foreach (var v in efd3.Declaration.Variables) RegisterMember(v.Identifier.Text);
@@ -760,12 +777,16 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
                         // counts the stereotype rules read.
                         if (WebFormsCompanion.IsCompanionPath(memberFile))
                         {
+                            // controlType (5.0.82): the synthesized field's
+                            // declared type — null only if the member somehow
+                            // isn't a field (never for companions today).
+                            companionFieldTypes.TryGetValue(memberKey, out var controlType);
                             if (subtype is null)
                                 rels.Add(new
                                 {
                                     type = edgeType,
                                     targetName = qualifiedTarget,
-                                    metadata = new { external = true, resolutionProvenance = ProvenanceHelpers.GeneratedCompanion },
+                                    metadata = new { external = true, resolutionProvenance = ProvenanceHelpers.GeneratedCompanion, controlType },
                                 });
                             else
                                 rels.Add(new
@@ -773,7 +794,7 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
                                     type = edgeType,
                                     subtype,
                                     targetName = qualifiedTarget,
-                                    metadata = new { external = true, resolutionProvenance = ProvenanceHelpers.GeneratedCompanion },
+                                    metadata = new { external = true, resolutionProvenance = ProvenanceHelpers.GeneratedCompanion, controlType },
                                 });
                             continue;
                         }

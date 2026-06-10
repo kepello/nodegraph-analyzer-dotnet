@@ -78,7 +78,7 @@ public partial class SubControl : System.Web.UI.UserControl {
         return root;
     }
 
-    private sealed record Edge(string Type, string? Subtype, string Target, string? TargetRef, bool External, string? Provenance);
+    private sealed record Edge(string Type, string? Subtype, string Target, string? TargetRef, bool External, string? Provenance, string? ControlType);
 
     [Fact]
     public void Wsp_markup_fields_synthesize_and_bindings_emit_per_pattern_category()
@@ -96,6 +96,9 @@ public partial class SubControl : System.Web.UI.UserControl {
             Assert.True(lblAccess.External);
             Assert.Equal("generated-companion", lblAccess.Provenance);
             Assert.Null(lblAccess.TargetRef);
+            // controlType (5.0.82): the synthesized field's declared type rides
+            // the edge so interactionSurface can derive controlKind graph-side.
+            Assert.Equal("System.Web.UI.WebControls.Label", lblAccess.ControlType);
             // …and the member write lands in System.Web as external-library.
             Assert.Contains(pageEdges, e => e.Type == "calls" && e.Subtype == "property-set"
                 && e.Target.Contains("text") && e.External && e.Provenance == "external-library");
@@ -244,12 +247,15 @@ public partial class P : System.Web.UI.Page {
                         var tr = e.TryGetProperty("targetRef", out var trl) ? trl.GetString() : null;
                         var ext = false;
                         string? prov = null;
+                        string? controlType = null;
                         if (e.TryGetProperty("metadata", out var md) && md.ValueKind == JsonValueKind.Object)
                         {
                             ext = md.TryGetProperty("external", out var ex) && ex.ValueKind == JsonValueKind.True;
                             prov = md.TryGetProperty("resolutionProvenance", out var pv) ? pv.GetString() : null;
+                            controlType = md.TryGetProperty("controlType", out var ct) && ct.ValueKind == JsonValueKind.String
+                                ? ct.GetString() : null;
                         }
-                        list.Add(new Edge(ty, st, tn, tr, ext, prov));
+                        list.Add(new Edge(ty, st, tn, tr, ext, prov, controlType));
                     }
                 }
             }
