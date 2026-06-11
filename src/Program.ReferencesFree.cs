@@ -22,7 +22,7 @@ using System.Linq;
 
 static class ReferencesFreeReporting
 {
-    public const string LimitationKind = "csharp-references-free-compilation";
+    public const string LimitationKind = "references-free-compilation";
 
     /// <summary>
     /// Group-J <c>Limitation</c> attached to every element of a file analyzed

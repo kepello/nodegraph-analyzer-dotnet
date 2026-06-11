@@ -2,6 +2,28 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.46.0] — 2026-06-11
+
+**Emit taxonomy-canonical limitation kinds — fold `csharp-*` namespace** (Fathom row `limitation-kind-taxonomy-bypass` 5.0.98.1). The four `csharp-*` limitation kind strings emitted by this analyzer are renamed to their language-agnostic canonical taxonomy names, now that the taxonomy accepts them as first-class kinds (per `@kepello/nodegraph-limitations@0.6.0`).
+
+### Changed
+
+- `Program.ReferencesFree.cs`: `ReferencesFreeReporting.LimitationKind` constant renamed from `"csharp-references-free-compilation"` → `"references-free-compilation"`.
+- `Program.cs` line 548: canonical-name-collision kind string renamed `"csharp-canonical-name-collision"` → `"canonical-name-collision"`.
+- `Program.cs` line 829: ambiguous-overload kind string renamed `"csharp-ambiguous-overload"` → `"ambiguous-overload"`.
+- `Program.cs` lines 2052 + 2206: both unresolved-call emit sites renamed `"csharp-unresolved-call"` → `"unresolved-call"` (fold into the existing taxonomy kind — it was always this kind).
+
+### No migration
+
+Pre-prod — delete `.fathom/graph.db` and re-analyze to refresh the graph. Existing records carrying the old `csharp-*` strings are invalid under the taxonomy-bypass forcing function added in `@kepello/nodegraph-limitations@0.6.0`; they are cleared on re-analysis.
+
+### Tests
+
+- `tests/ReferencesFreeReportingTests.cs`: assertion updated from `"csharp-references-free-compilation"` → `"references-free-compilation"`. RED witnessed: `Expected: references-free-compilation / Actual: csharp-references-free-compilation`.
+- `tests/CallResolutionIntegrationTests.cs`: assertion updated from `"csharp-canonical-name-collision"` → `"canonical-name-collision"`. RED witnessed: `Item not found in collection ["csharp-references-free-compilation", "csharp-canonical-name-collision"]`.
+- Release DLL rebuilt via `npm run build` (`dotnet publish -c Release`).
+- Analyzer 215 pass (unchanged count; 2 tests now assert the new kind strings).
+
 ## [0.45.0] — 2026-06-10
 
 **Reference qualification — bare `references/identifier` and `references/generic-constraint` edges eliminated** (Fathom row `dotnet-l0-ref-qualification` 5.0.93). The A2 census found C# had a ~45.8% ambiguous-tail rate on `references` edges — tails resolving to bare member names (`run`, `process`, `value`) that the substrate tail-matcher could mis-bind, since .NET natural keys are TYPE-QUALIFIED (`runner/run-parsedargs`). Same-file members don't bind bare even within their own artifact. Two emission sites replaced with semantic-model resolution:

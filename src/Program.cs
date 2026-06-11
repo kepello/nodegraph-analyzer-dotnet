@@ -545,7 +545,7 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
                 var collisionSpan = node.GetLocation().GetLineSpan();
                 limitationsAccumulator.Add(new Dictionary<string, object?>
                 {
-                    ["kind"] = "csharp-canonical-name-collision",
+                    ["kind"] = "canonical-name-collision",
                     ["severity"] = "minor",
                     ["location"] = new Dictionary<string, object?>
                     {
@@ -826,7 +826,7 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
                     var ambSpan = node.GetLocation().GetLineSpan();
                     limitationsAccumulator.Add(new Dictionary<string, object?>
                     {
-                        ["kind"] = "csharp-ambiguous-overload",
+                        ["kind"] = "ambiguous-overload",
                         ["severity"] = "minor",
                         ["location"] = new Dictionary<string, object?>
                         {
@@ -2049,7 +2049,7 @@ static object[] ExtractRelationships(
                 var callSpan = invocation.GetLocation().GetLineSpan();
                 limitations.Add(new Dictionary<string, object?>
                 {
-                    ["kind"] = "csharp-unresolved-call",
+                    ["kind"] = "unresolved-call",
                     ["severity"] = "minor",
                     ["location"] = new Dictionary<string, object?>
                     {
@@ -2203,7 +2203,7 @@ static object[] ExtractRelationships(
                 var hSpan = assign.GetLocation().GetLineSpan();
                 limitations.Add(new Dictionary<string, object?>
                 {
-                    ["kind"] = "csharp-unresolved-call",
+                    ["kind"] = "unresolved-call",
                     ["severity"] = "minor",
                     ["location"] = new Dictionary<string, object?>
                     {

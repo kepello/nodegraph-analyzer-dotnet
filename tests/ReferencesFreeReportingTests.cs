@@ -21,7 +21,7 @@ public class ReferencesFreeReportingTests
     {
         var lim = ReferencesFreeReporting.BuildLimitation("/repo/EnvisionAnywhere.com/Portal/Foo.aspx.cs");
 
-        Assert.Equal("csharp-references-free-compilation", lim["kind"]);
+        Assert.Equal("references-free-compilation", lim["kind"]);
         Assert.Equal("significant", lim["severity"]);
         var loc = Assert.IsType<Dictionary<string, object?>>(lim["location"]);
         Assert.Equal("/repo/EnvisionAnywhere.com/Portal/Foo.aspx.cs", loc["file"]);

@@ -193,7 +193,7 @@ public class CameraPropertyValue {
             Assert.True(ep.ContainsKey("camerapropertyvalue/isauto"), "first declaration kept");
             Assert.True(ep.ContainsKey("camerapropertyvalue/isauto-casedup1"), "second declaration kept (disambiguated), not dropped");
             var (_, limitations) = AnalyzeFile(dir, "Cam.cs");
-            Assert.Contains("csharp-canonical-name-collision", limitations);
+            Assert.Contains("canonical-name-collision", limitations);
         }
         finally { Directory.Delete(dir, true); }
     }
