@@ -2,6 +2,28 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.47.0] — 2026-06-11
+
+**Span-consistent per-line LOC classification — out-of-span XML-doc no longer subtracted from LOC** (Fathom row `l0-dotnet-linesofcode-outofspan` 3.1.1.1.9.1b). `ExtractObservation` / `CountCommentLines` had the same out-of-span defect as the TS analyzer: `GetLocation().GetLineSpan().Span` (the physical span, EXCLUDES leading XML-doc trivia) was used for `physicalLinesOfCode`, but `CountCommentLines` called `DescendantTrivia()` which INCLUDES the first token's leading XML-doc trivia (FullSpan). Subtracting out-of-span doc lines from the in-span count floored LOC to 0 for documented elements and silently understated LOC corpus-wide. A second defect: `trivia.ToFullString().Split('\n').Length` overcounted a 10-line doc block as 11 (trailing-newline +1). Both defects are resolved. Policy matches the Swift analyzer reference and the TS fix in `analyzer-typescript@0.44.0` — both analyzers now agree on the unified span-consistent policy.
+
+### Fixed
+
+- `src/Program.Analysis.cs` — `ExtractObservation`: replaced the `CountCommentLines(node)` trivia-based subtraction with a per-line classification loop strictly within `[startLine, endLine]`. Each physical line is classified as exactly one of blank / comment-only / code; the element's leading XML-doc block (out-of-span) is NOT entered into the LOC formula — its signal lives in `documentation.hasDocComment` / `documentation.docCommentLineCount` (unchanged). A code line with a trailing `// note` starts with code text → classified as CODE (mixed-line policy). `linesOfCode` = physical − blanks − in-span-comment-only lines; `commentDensity` = in-span-comment-only / physical, bounded `[0,1]` by construction.
+- `src/Program.Analysis.cs` — `ExtractDocumentation`: `docCommentLineCount` now counts newline characters across all contiguous leading doc-comment trivia items rather than using `ToFullString().Split('\n').Length` on the first trivia item. Each `///` line ends in exactly one `\n`, so the count is exact (no trailing-newline +1 overcount).
+- `src/Program.Analysis.cs` — removed `Math.Max(0, …)` floor on `linesOfCode`; replaced with an `InvalidOperationException` throw — a negative after span-consistent classification is structurally impossible and indicates a bug (no-silent-degradation, Fathom row 3.1.1.1.9.1b).
+- `src/Program.Analysis.cs` — `CountCommentLines` method removed (replaced by the per-line scan in `ExtractObservation`); a comment records the rationale (mirrors the TS `// countCommentLines removed` comment in `ts-metrics.ts`).
+
+### No migration
+
+Pre-prod — delete `.fathom/graph.db` and re-analyze to refresh the graph. `linesOfCode` values will increase for documented elements (previously floored to 0 or understated); `commentDensity` values will decrease (previously counted out-of-span doc lines). Any cached or stored metrics from prior analyzer versions are invalid and must be regenerated.
+
+### Tests
+
+- `tests/SizeObservationTests.cs` — new file: 8 tests, 5 regression categories (all witnessed RED on the pre-fix code): cat-1 `Cat1_DocumentedMethod_DocLinesGtCodeLines_LocNotZero` (linesOfCode expected 0, actual 3 post-fix; `commentLineCount` expected 0 was actually 11); cat-2 `Cat2_DocumentedLargeMethod_LoCUnderstated` (linesOfCode expected 9 was 5; `commentLineCount` expected 0 was 4); cat-3 `Cat3_TrailingSameLineComment_CountsAsCode` (`commentLineCount` expected 0 was 2); cat-4 `Cat4_CommentDensityBoundedLeOnePointZero` (`commentDensity` expected ≤1.0 was 1.6666); cat-5 `Cat5_DocCommentLineCount_TenLineDocBlock_IsExactlyTen` (`docCommentLineCount` expected 10 was 11). Plus 3 existing-semantics regression guards confirming documentation fields survive the fix.
+- `tests/NodegraphAnalyzerDotnet.Tests.csproj` — added `<Compile Include="../src/Program.Analysis.cs" …/>` so in-process tests can call `AnalysisHelpers.ExtractObservation` directly (without spawning the DLL).
+- Release DLL rebuilt via `npm run build` (`dotnet publish -c Release -o dist/`).
+- Analyzer 223 pass (was 215; +8 new tests).
+
 ## [0.46.0] — 2026-06-11
 
 **Emit taxonomy-canonical limitation kinds — fold `csharp-*` namespace** (Fathom row `limitation-kind-taxonomy-bypass` 5.0.98.1). The four `csharp-*` limitation kind strings emitted by this analyzer are renamed to their language-agnostic canonical taxonomy names, now that the taxonomy accepts them as first-class kinds (per `@kepello/nodegraph-limitations@0.6.0`).

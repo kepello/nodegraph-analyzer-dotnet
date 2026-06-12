@@ -6,10 +6,20 @@
 ///   - AnalyzerObservation.size — per-element size measurements
 ///   - role / flavors / capabilities — declarable taxonomy metadata
 ///
-/// Per the 0.4.0 contract:
-///   - `linesOfCode` is the effective LOC (span − blanks − comments)
-///   - `physicalLinesOfCode` is the geometric span
-///   - `commentDensity` divides commentLineCount by physicalLinesOfCode
+/// Per the 0.4.0 contract (Fathom row 3.1.1.1.9.1b — span-consistent
+/// per-line classification, matching the Swift reference and the TS
+/// fix shipped in analyzer-typescript@0.44.0):
+///   - `linesOfCode` = in-span code lines (physical − blanks − in-span
+///     comment-only lines; the element's leading XML-doc block is EXCLUDED
+///     — it is out-of-span trivia and must NOT enter the LOC formula)
+///   - `physicalLinesOfCode` is the geometric span from
+///     GetLocation().GetLineSpan() (excludes leading trivia)
+///   - `commentDensity` = in-span comment lines / physicalLinesOfCode
+///     (bounded [0,1] by construction — every physical line is exactly
+///     one of blank | comment-only | code)
+///   - A negative linesOfCode after span-consistent classification is
+///     impossible by construction; if it occurs, we throw rather than
+///     floor (no-silent-degradation, Fathom row 3.1.1.1.9.1b)
 ///
 /// Statement-level body measurements (the old `logicalLinesOfCode`)
 /// move into per-method scalars in slice 3 — not emitted today.
@@ -32,29 +42,55 @@ static class AnalysisHelpers
     /// </summary>
     public static object ExtractObservation(SyntaxNode node, SyntaxTree tree)
     {
+        // GetLocation().GetLineSpan() returns the PHYSICAL span of the node's
+        // token range — it EXCLUDES leading trivia (XML-doc comments, leading
+        // blank lines). This is the correct anchor for span-consistent
+        // classification (Fathom row 3.1.1.1.9.1b).
         var lineSpan = node.GetLocation().GetLineSpan();
         var startLine = lineSpan.StartLinePosition.Line + 1; // 1-based
         var endLine = lineSpan.EndLinePosition.Line + 1;
         var physicalLinesOfCode = endLine - startLine + 1;
 
+        // Per-line classification strictly within [startLine, endLine].
+        // The leading XML-doc block (out-of-span) MUST NOT enter the LOC
+        // formula — its signal lives in the documentation sub-record.
+        // A line is classified as exactly ONE of:
+        //   blank        — TrimmedText is empty
+        //   comment-only — trimmed starts with `//`, `/*`, or `*`
+        //                  (catches `///`, `/* ... */`, `* continuation`)
+        //   code         — everything else (incl. `code; // trailing`)
+        //                  A trailing-comment line starts with code, so it
+        //                  falls here (mixed-line policy).
         var sourceText = tree.GetText();
         var blankLineCount = 0;
+        var commentLineCount = 0;
         for (var i = startLine; i <= endLine && i <= sourceText.Lines.Count; i++)
         {
-            var line = sourceText.Lines[i - 1].ToString();
-            if (string.IsNullOrWhiteSpace(line)) blankLineCount++;
+            var trimmed = sourceText.Lines[i - 1].ToString().Trim();
+            if (trimmed.Length == 0)
+                blankLineCount++;
+            else if (trimmed.StartsWith("//") || trimmed.StartsWith("/*") || trimmed.StartsWith("*"))
+                commentLineCount++;
+            // else: code line (including mixed code + trailing comment)
         }
 
-        var commentLineCount = CountCommentLines(node);
-        // Effective LOC: span minus blanks minus comments. Bounded at 0
-        // for degenerate cases where the comment counter overcounts.
-        var linesOfCode = Math.Max(0, physicalLinesOfCode - blankLineCount - commentLineCount);
+        // Span-consistent classification guarantees linesOfCode ≥ 0 by
+        // construction (every physical line is exactly one of blank/comment/code).
+        // A negative result here is a bug — throw rather than silently floor
+        // (no-silent-degradation; Fathom row 3.1.1.1.9.1b).
+        var linesOfCode = physicalLinesOfCode - blankLineCount - commentLineCount;
+        if (linesOfCode < 0)
+            throw new InvalidOperationException(
+                $"[Analysis] linesOfCode went negative ({linesOfCode}) for node at " +
+                $"{tree.FilePath}:{startLine}-{endLine}. " +
+                $"This is a bug in span-consistent classification; report to Fathom 3.1.1.1.9.1b."
+            );
 
+        // commentDensity = inSpanCommentLines / physicalSpan — bounded [0,1]
+        // by construction (numerator ≤ denominator, both non-negative).
         double? commentDensity = null;
         if (physicalLinesOfCode > 0)
-        {
             commentDensity = (double)commentLineCount / physicalLinesOfCode;
-        }
 
         var size = new Dictionary<string, object?>
         {
@@ -101,18 +137,35 @@ static class AnalysisHelpers
         var hasDocComment = false;
         int? docCommentLineCount = null;
 
+        // Roslyn emits each `///` line as its own SingleLineDocumentationCommentTrivia.
+        // Counting via Split('\n').Length on the first such trivia would return 2 for
+        // a single-line doc (the trailing \n splits the string into two parts).
+        // Instead, sum the actual newline characters across ALL contiguous leading
+        // doc-comment trivia — each `///` line's ToFullString() ends in exactly one
+        // `\n`, so the total newline count equals the exact number of doc lines
+        // (no trailing-newline +1 overcount; Fathom row 3.1.1.1.9.1b).
+        var docLineAccumulator = 0;
+        var inDocBlock = false;
         foreach (var trivia in node.GetLeadingTrivia())
         {
             if (trivia.IsKind(SyntaxKind.SingleLineDocumentationCommentTrivia)
                 || trivia.IsKind(SyntaxKind.MultiLineDocumentationCommentTrivia))
             {
                 hasDocComment = true;
-                if (docCommentLineCount == null)
-                {
-                    docCommentLineCount = trivia.ToFullString().Split('\n').Length;
-                }
+                inDocBlock = true;
+                // Count \n characters rather than Split('\n').Length to avoid
+                // the trailing-newline +1 (each `///` line ends in exactly one \n).
+                foreach (var ch in trivia.ToFullString())
+                    if (ch == '\n') docLineAccumulator++;
+            }
+            else if (inDocBlock)
+            {
+                // Stop accumulating once we exit the contiguous doc block.
+                break;
             }
         }
+        if (hasDocComment)
+            docCommentLineCount = docLineAccumulator > 0 ? docLineAccumulator : 1;
 
         var counts = new Dictionary<string, int>
         {
@@ -212,25 +265,13 @@ static class AnalysisHelpers
         return false;
     }
 
-    /// <summary>
-    /// Count comment-trivia lines within a node's source span.
-    /// </summary>
-    static int CountCommentLines(SyntaxNode node)
-    {
-        var count = 0;
-        foreach (var trivia in node.DescendantTrivia())
-        {
-            if (trivia.IsKind(SyntaxKind.SingleLineCommentTrivia)
-                || trivia.IsKind(SyntaxKind.MultiLineCommentTrivia)
-                || trivia.IsKind(SyntaxKind.SingleLineDocumentationCommentTrivia)
-                || trivia.IsKind(SyntaxKind.MultiLineDocumentationCommentTrivia))
-            {
-                var text = trivia.ToFullString();
-                count += text.Split('\n').Length;
-            }
-        }
-        return count;
-    }
+    // CountCommentLines removed (Fathom row 3.1.1.1.9.1b): LOC counting is now
+    // strictly per-line within [startLine, endLine] — see ExtractObservation.
+    // The trivia-based approach (DescendantTrivia) included the first token's
+    // leading XML-doc trivia (out-of-span), causing docLines to be subtracted
+    // from an in-span physical count and flooring to 0 under Math.Max(0,…).
+    // Additionally, ToFullString().Split('\n').Length overcounted by 1 (trailing
+    // newline). Both defects are resolved by the per-line source-text scan.
 
     // --- Declarable Taxonomy Mapping ----------------------------------
 

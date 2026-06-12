@@ -35,6 +35,7 @@
     <Compile Include="../src/Program.WebFormsMarkup.cs" Link="Program.WebFormsMarkup.cs" />
     <Compile Include="../src/Program.FrameworkReferences.cs" Link="Program.FrameworkReferences.cs" />
     <Compile Include="../src/Program.CompileSetCoverage.cs" Link="Program.CompileSetCoverage.cs" />
+    <Compile Include="../src/Program.Analysis.cs" Link="Program.Analysis.cs" />
     <Compile Include="../src/Program.Annotations.cs" Link="Program.Annotations.cs" />
     <Compile Include="../src/Program.Provenance.cs" Link="Program.Provenance.cs" />
   </ItemGroup>
