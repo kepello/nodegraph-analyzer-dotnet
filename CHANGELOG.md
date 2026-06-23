@@ -2,6 +2,24 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.48.0] — 2026-06-12
+
+Stateful per-line classifier — verbatim-string and block-comment interior lines now classified correctly. Closes Fathom row 3.1.1.1.9.1c `l1-loc-classifier-prefix-only-string-block`.
+
+### Fixed
+
+- **F1 — verbatim-string interior lines no longer miscounted as comments:** The stateless classifier checked trimmed-line prefix only, so a line inside a multi-line C# verbatim string (`@"…"`) whose content started with `//` was counted as a comment line → LOC undercounted, `commentDensity` inflated. Fix: `inVerbatimString` state (entered on `@"`, exited when `HasVerbatimStringClose` finds an unescaped `"` on a subsequent line) suppresses the comment check while inside a verbatim string.
+- **F2 — non-star block-comment interior lines no longer miscounted as code:** Same as the TS fix — a block comment whose interior line lacks the `*` prefix was classified as code. Fix: `inBlockComment` state classifies all interior lines as comment regardless of prefix.
+- **`HasVerbatimStringClose` helper added** for detecting the closing `"` of a verbatim string (handles `""` escaped pairs; C# 11 raw strings are out of scope).
+
+### Test coverage
+
+Two new RED-witnessed regression fixtures in `SizeObservationTests.cs`:
+- `F1_VerbatimStringInterior_CommentTokenIsCode` — `//` line inside `@"…"` classified as code.
+- `F2_NonStarBlockCommentInterior_IsComment` — non-star block interior classified as comment.
+
+---
+
 ## [0.47.0] — 2026-06-11
 
 **Span-consistent per-line LOC classification — out-of-span XML-doc no longer subtracted from LOC** (Fathom row `l0-dotnet-linesofcode-outofspan` 3.1.1.1.9.1b). `ExtractObservation` / `CountCommentLines` had the same out-of-span defect as the TS analyzer: `GetLocation().GetLineSpan().Span` (the physical span, EXCLUDES leading XML-doc trivia) was used for `physicalLinesOfCode`, but `CountCommentLines` called `DescendantTrivia()` which INCLUDES the first token's leading XML-doc trivia (FullSpan). Subtracting out-of-span doc lines from the in-span count floored LOC to 0 for documented elements and silently understated LOC corpus-wide. A second defect: `trivia.ToFullString().Split('\n').Length` overcounted a 10-line doc block as 11 (trailing-newline +1). Both defects are resolved. Policy matches the Swift analyzer reference and the TS fix in `analyzer-typescript@0.44.0` — both analyzers now agree on the unified span-consistent policy.

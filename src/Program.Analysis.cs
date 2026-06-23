@@ -56,22 +56,65 @@ static class AnalysisHelpers
         // formula — its signal lives in the documentation sub-record.
         // A line is classified as exactly ONE of:
         //   blank        — TrimmedText is empty
-        //   comment-only — trimmed starts with `//`, `/*`, or `*`
-        //                  (catches `///`, `/* ... */`, `* continuation`)
+        //   comment-only — line is inside a block comment (/* ... */ tracked
+        //                  statefully), OR trimmed starts with `//`, `/*`, or `*`
+        //                  (`*` prefix convention for block interiors).
+        //                  Lines inside a verbatim string are always code even if
+        //                  their trimmed form starts with `//` (F1 fix — 3.1.1.1.9.1c).
         //   code         — everything else (incl. `code; // trailing`)
         //                  A trailing-comment line starts with code, so it
         //                  falls here (mixed-line policy).
         var sourceText = tree.GetText();
         var blankLineCount = 0;
         var commentLineCount = 0;
+        var inBlockComment = false;    // inside /* ... */ spanning multiple lines
+        var inVerbatimString = false;  // inside @"..." spanning multiple lines
         for (var i = startLine; i <= endLine && i <= sourceText.Lines.Count; i++)
         {
-            var trimmed = sourceText.Lines[i - 1].ToString().Trim();
+            var lineText = sourceText.Lines[i - 1].ToString();
+            var trimmed = lineText.Trim();
             if (trimmed.Length == 0)
+            {
                 blankLineCount++;
-            else if (trimmed.StartsWith("//") || trimmed.StartsWith("/*") || trimmed.StartsWith("*"))
+                continue;
+            }
+            if (inBlockComment)
+            {
+                // Interior of a multi-line block comment — comment line regardless
+                // of prefix (F2 fix: non-star block interiors were miscounted as code).
                 commentLineCount++;
-            // else: code line (including mixed code + trailing comment)
+                if (lineText.Contains("*/")) inBlockComment = false;
+                continue;
+            }
+            if (inVerbatimString)
+            {
+                // Inside a verbatim string — code line regardless of prefix
+                // (F1 fix: `//` inside @"..." was miscounted as comment).
+                if (HasVerbatimStringClose(lineText)) inVerbatimString = false;
+                continue;
+            }
+            // Normal state: classify the line.
+            if (trimmed.StartsWith("//"))
+                commentLineCount++;
+            else if (trimmed.StartsWith("/*"))
+            {
+                commentLineCount++;
+                // Multi-line opener: no `*/` after the `/*` → block continues.
+                if (!trimmed.Substring(2).Contains("*/")) inBlockComment = true;
+            }
+            else if (trimmed.StartsWith("*"))
+                // Interior block-comment line using the `*` prefix convention.
+                commentLineCount++;
+            else
+            {
+                // Code line — check for verbatim string open or mid-line block comment.
+                var atIdx = lineText.IndexOf("@\"");
+                if (atIdx >= 0 && !HasVerbatimStringClose(lineText.Substring(atIdx + 2)))
+                    inVerbatimString = true;
+                var bcIdx = lineText.IndexOf("/*");
+                if (bcIdx >= 0 && !lineText.Substring(bcIdx + 2).Contains("*/"))
+                    inBlockComment = true;
+            }
         }
 
         // Span-consistent classification guarantees linesOfCode ≥ 0 by
@@ -261,6 +304,23 @@ static class AnalysisHelpers
             }
             if (cur is EnumMemberDeclarationSyntax) return true;
             cur = cur.Parent;
+        }
+        return false;
+    }
+
+    // Returns true when `line` contains a `"` that is NOT part of an escaped `""`
+    // pair — i.e. the closing delimiter of a C# verbatim string (Fathom 3.1.1.1.9.1c).
+    private static bool HasVerbatimStringClose(string line)
+    {
+        for (int i = 0; i < line.Length; i++)
+        {
+            if (line[i] == '"')
+            {
+                if (i + 1 < line.Length && line[i + 1] == '"')
+                    i++; // skip escaped "" pair
+                else
+                    return true; // found unescaped closing "
+            }
         }
         return false;
     }

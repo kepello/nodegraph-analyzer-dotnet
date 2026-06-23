@@ -281,6 +281,75 @@ public class SizeObservationTests
     // --- existing documentation semantics regression ----------------------
     //     Confirm that documentation fields survive the LOC fix intact.
 
+    // --- bug regression: 3.1.1.1.9.1c l0-loc-classifier-prefix-only-string-block ----
+    //
+    // Root cause: the per-line classifier was stateless (prefix-only), so:
+    //   F1: a line inside a C# verbatim string that starts with a comment token
+    //       (`//`) was miscounted as a comment line (LOC undercounted).
+    //   F2: a line inside a block comment that does NOT start with `*` was
+    //       miscounted as a code line (LOC overcounted).
+    // Fix: stateful per-line classification tracking inBlockComment + inVerbatimString.
+
+    [Fact]
+    public void F1_VerbatimStringInterior_CommentTokenIsCode()
+    {
+        // A line inside a @"..." verbatim string that starts with // must be
+        // classified as CODE, not comment (it is string content, not source comment).
+        const string code = @"public class C {
+    public string WithVerbatim() {
+        var s = @""
+// looks like a comment but is string content
+   no comment here either
+"";
+        return s;
+    }
+}";
+        // Lines of WithVerbatim() (startLine=2, endLine=8, physicalLinesOfCode=7):
+        //  2:     public string WithVerbatim() {
+        //  3:         var s = @"        ← opens verbatim string
+        //  4: // looks like a comment   ← F1: currently comment, must be code
+        //  5:    no comment here either ← verbatim string interior
+        //  6: ";                        ← closes verbatim string
+        //  7:         return s;
+        //  8:     }
+        var obs = ExtractFirstMethod(code);
+        var size = GetSection(obs, "size");
+
+        Assert.Equal(7, I(size, "physicalLinesOfCode"));
+        // Line 4 is inside a verbatim string — must be code, not comment.
+        Assert.Equal(0, I(size, "commentLineCount"));
+        Assert.Equal(7, I(size, "linesOfCode"));
+    }
+
+    [Fact]
+    public void F2_NonStarBlockCommentInterior_IsComment()
+    {
+        // A block comment interior line that does NOT start with `*` must still
+        // be counted as a comment line. The stateless classifier missed these.
+        const string code = @"public class C {
+    public int WithNonStarBlock() {
+        /* a comment
+           no star here
+        */
+        return 1;
+    }
+}";
+        // Lines of WithNonStarBlock() (startLine=2, endLine=7, physicalLinesOfCode=6):
+        //  2:     public int WithNonStarBlock() {
+        //  3:         /* a comment           ← comment (opens block)
+        //  4:            no star here        ← F2: currently code, must be comment
+        //  5:         */                     ← comment (closes block)
+        //  6:         return 1;
+        //  7:     }
+        var obs = ExtractFirstMethod(code);
+        var size = GetSection(obs, "size");
+
+        Assert.Equal(6, I(size, "physicalLinesOfCode"));
+        // Lines 3, 4, 5 are all part of the block comment.
+        Assert.Equal(3, I(size, "commentLineCount"));
+        Assert.Equal(3, I(size, "linesOfCode"));
+    }
+
     [Fact]
     public void Existing_DocFieldsStillPopulated_AfterFix()
     {
