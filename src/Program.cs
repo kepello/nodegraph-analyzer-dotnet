@@ -588,7 +588,7 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
 
         var sourceText = node.ToFullString().Trim();
         var contentHash = ComputeHash(sourceText);
-        var relationships = ExtractRelationships(node, allNames, semanticModel, filePath, limitationsAccumulator, canonicalizeFilePath);
+        var relationships = ExtractRelationships(node, allNames, semanticModel, filePath, limitationsAccumulator, canonicalizeFilePath, canonicalByNode);
 
         // Type declarations emit explicit contains edges to their direct
         // members. Core treats these as authoritative for containment. The
@@ -1610,10 +1610,29 @@ static object[] ExtractRelationships(
     SemanticModel semanticModel,
     string currentFilePath,
     List<object> limitations,
-    Func<string, string> canonicalizeFilePath)
+    Func<string, string> canonicalizeFilePath,
+    Dictionary<SyntaxNode, (string Name, string QualifiedRaw)> elementNodes)
 {
     var relationships = new List<object>();
     var seen = new HashSet<string>();
+
+    // Own-body ownership guard (F1 .NET-sibling fix — Fathom row 3.1.1.1.9.1b-F1):
+    // ExtractRelationships is called once PER element node. The four call-emitting
+    // sweeps use `node.DescendantNodes()`, which descends THROUGH nested element
+    // bodies. Without this guard a class/type element re-emits every `new T()`,
+    // `event += h`, and property access inside its members — duplicating the
+    // correct per-member edges. Fix: attribute each call/access site to its NEAREST
+    // enclosing element node; keep it only when that element IS the current `node`.
+    // Roslyn red nodes use reference identity (stable per tree); `p == node` /
+    // `elementNodes.ContainsKey(p)` are safe. Mirrors analyzer-ts 0.46.0.
+    bool OwnsCallSite(SyntaxNode site)
+    {
+        for (var p = site.Parent; p != null; p = p.Parent)
+        {
+            if (elementNodes.ContainsKey(p)) return p == node; // nearest enclosing element
+        }
+        return true; // no element ancestor — shouldn't happen; node is itself an element
+    }
 
     // Variant that emits targetRef when the target's file is resolvable
     // cross-file. Uses CanonicalizePath (slash-preserving) so qualified
@@ -2007,6 +2026,10 @@ static object[] ExtractRelationships(
     {
         foreach (var invocation in node.DescendantNodes().OfType<InvocationExpressionSyntax>())
         {
+            // Own-body guard: attribute this call to its nearest enclosing element.
+            // A method containing a local function (which IS its own element) would
+            // otherwise double-count the local function's invocations onto the method.
+            if (!OwnsCallSite(invocation)) continue;
             string? calledName = invocation.Expression switch
             {
                 IdentifierNameSyntax id => id.Identifier.Text,
@@ -2072,6 +2095,9 @@ static object[] ExtractRelationships(
     {
         foreach (var creation in node.DescendantNodes().OfType<ObjectCreationExpressionSyntax>())
         {
+            // Own-body guard: a type element must not re-emit constructor edges
+            // sourced from its members' bodies (F1 .NET-sibling fix).
+            if (!OwnsCallSite(creation)) continue;
             // B1 calls subtype core (Stage 3a): `constructor` for `new T(...)`.
             // Resolve the type semantically so the target binds to the type's
             // element key cross-file, and so external/BCL types (no declaration)
@@ -2180,6 +2206,9 @@ static object[] ExtractRelationships(
     {
         foreach (var assign in node.DescendantNodes().OfType<AssignmentExpressionSyntax>())
         {
+            // Own-body guard: a type element must not re-emit delegate edges
+            // sourced from its members' bodies (F1 .NET-sibling fix).
+            if (!OwnsCallSite(assign)) continue;
             if (!assign.IsKind(SyntaxKind.AddAssignmentExpression)) continue;
             var handlerName = assign.Right switch
             {
@@ -2340,6 +2369,9 @@ static object[] ExtractRelationships(
         bool isMember = access is MemberAccessExpressionSyntax;
         bool isElement = access is ElementAccessExpressionSyntax;
         if (!isMember && !isElement) continue;
+        // Own-body guard: a type element must not re-emit property-get/set edges
+        // sourced from its members' bodies (F1 .NET-sibling fix).
+        if (!OwnsCallSite(access)) continue;
         // Skip the callee position of an invocation (that's a method call).
         if (access.Parent is InvocationExpressionSyntax inv && inv.Expression == access) continue;
         // Read vs write: LHS of any assignment → set-accessor; else get.

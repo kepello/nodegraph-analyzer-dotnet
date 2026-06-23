@@ -479,6 +479,70 @@ public partial class Widget {
         finally { Directory.Delete(dir, true); }
     }
 
+    /// <summary>Run the analyzer on <paramref name="dir"/> and return
+    /// (elementName → edges) for the artifact ending with
+    /// <paramref name="fileSuffix"/>. Each edge tuple mirrors
+    /// <see cref="AnalyzeFile"/> but is keyed to its owning element so tests
+    /// can assert WHICH element emits a given edge (not just that it exists
+    /// anywhere in the artifact).</summary>
+    private static Dictionary<string, List<(string Type, string? Subtype, string Target, bool HasTargetRef, bool External)>>
+        AnalyzeEdgesPerElement(string dir, string fileSuffix)
+    {
+        var dll = AnalyzerDll();
+        Assert.True(dll != null, "analyzer DLL not built — run `dotnet build src -c Debug`");
+
+        var psi = new ProcessStartInfo("dotnet")
+        {
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        psi.ArgumentList.Add(dll!);
+        psi.ArgumentList.Add("--path");
+        psi.ArgumentList.Add(dir);
+        using var proc = Process.Start(psi)!;
+        proc.StandardInput.Write("{}");
+        proc.StandardInput.Close();
+        var stdout = proc.StandardOutput.ReadToEnd();
+        proc.WaitForExit(60_000);
+
+        var result = new Dictionary<string, List<(string, string?, string, bool, bool)>>();
+        foreach (var line in stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            JsonDocument doc;
+            try { doc = JsonDocument.Parse(line); } catch { continue; }
+            using (doc)
+            {
+                var root = doc.RootElement;
+                if (!root.TryGetProperty("type", out var t) || t.GetString() != "artifact") continue;
+                var artifact = root.GetProperty("artifact");
+                var id = artifact.TryGetProperty("id", out var idEl) ? idEl.GetString() ?? "" : "";
+                if (!id.Replace('\\', '/').EndsWith(fileSuffix)) continue;
+                if (!artifact.TryGetProperty("elements", out var elements)) continue;
+                foreach (var el in elements.EnumerateArray())
+                {
+                    var elName = el.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
+                    if (!result.ContainsKey(elName)) result[elName] = new();
+                    if (!el.TryGetProperty("edges", out var elEdges) || elEdges.ValueKind != JsonValueKind.Array) continue;
+                    foreach (var e in elEdges.EnumerateArray())
+                    {
+                        var type = e.TryGetProperty("type", out var ty) ? ty.GetString() ?? "" : "";
+                        var subtype = e.TryGetProperty("subtype", out var st) ? st.GetString() : null;
+                        var target = e.TryGetProperty("targetName", out var tn) ? tn.GetString() ?? "" : "";
+                        var hasRef = e.TryGetProperty("targetRef", out _);
+                        var external = e.TryGetProperty("metadata", out var md)
+                            && md.ValueKind == JsonValueKind.Object
+                            && md.TryGetProperty("external", out var ext)
+                            && ext.ValueKind == JsonValueKind.True;
+                        result[elName].Add((type, subtype, target, hasRef, external));
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
     private static string MakeTempTree(params (string Name, string Body)[] files)
     {
         var dir = Path.Combine(Path.GetTempPath(), "fathom-callres-" + Guid.NewGuid().ToString("N"));
@@ -625,6 +689,85 @@ public class Wiring {
             // The `+= OnTick` handler resolves to the signatured method element.
             Assert.Contains(edges, e => e.Type == "calls" && e.Subtype == "delegates"
                 && e.Target.StartsWith("wiring/ontick"));
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void OwnBodyOwnership_ClassDoesNotDuplicateMemberBodyEdges()
+    {
+        // Fathom row F1-.NET-sibling (3.1.1.1.9.1b-F1): ExtractRelationships
+        // called `node.DescendantNodes()` without guarding for own-body
+        // ownership, so for a TypeDeclaration node the sweeps descended INTO
+        // member bodies and RE-EMITTED every `new T()`, `event += h`, and
+        // property access as `calls` edges sourced from the CLASS element —
+        // duplicating the correct per-member edges. Analogous to the TS sibling
+        // fixed in analyzer-ts 0.46.0 (SCIP differential-oracle confirmed 20.3%
+        // call-graph inflation). Fix: each call site is attributed to its
+        // NEAREST enclosing element; keep it only when that element is `node`.
+        //
+        // Fixture: class `Svc` with:
+        //   - method `Run` that does `new Widget()`, reads `_dep.Value`
+        //     (property-get), and does `this.Evt += OnEvt` (delegates edge);
+        //   - method `Each` with an inline lambda `x => new Widget()`.
+        //
+        // Assertions:
+        //   A1. `svc` (the TYPE element) emits NO `calls/constructor`,
+        //       NO `calls/delegates`, and NO `calls/property-get` — member
+        //       bodies are not the class's own body.
+        //   A2. `svc/run` DOES emit the constructor, delegates, and property-get
+        //       edges (the correct per-method attribution).
+        //   A3. The lambda's `new Widget()` attributes to `svc/each-...` (the
+        //       enclosing METHOD), not to `svc` — lambdas are not their own
+        //       element, so the enclosing method is the nearest element owner.
+        var dir = MakeTempTree(("Svc.cs", @"
+public class Svc {
+    private Widget _dep = new Widget();
+    public event System.EventHandler Evt;
+    public void Run() {
+        var w = new Widget();
+        var v = _dep.Value;
+        this.Evt += OnEvt;
+    }
+    public void Each(System.Collections.Generic.List<int> items) {
+        items.ForEach(x => new Widget());
+    }
+    private void OnEvt(object s, System.EventArgs e) { }
+}
+public class Widget {
+    public int Value { get; set; }
+}"));
+        try
+        {
+            var byElement = AnalyzeEdgesPerElement(dir, "Svc.cs");
+
+            // A1 — the TYPE element `svc` must emit NO constructor/delegates/
+            // property-get calls edges (those belong to the member bodies, not
+            // to the class's own syntax scope).
+            var svcEdges = byElement.GetValueOrDefault("svc") ?? new();
+            Assert.DoesNotContain(svcEdges, e => e.Type == "calls" && e.Subtype == "constructor"
+                && e.Target == "widget");
+            Assert.DoesNotContain(svcEdges, e => e.Type == "calls" && e.Subtype == "delegates");
+            Assert.DoesNotContain(svcEdges, e => e.Type == "calls" && e.Subtype == "property-get"
+                && e.Target == "widget/value/get");
+
+            // A2 — method `svc/run` DOES emit those edges (correct attribution).
+            var runEdges = byElement.GetValueOrDefault("svc/run") ?? new();
+            Assert.Contains(runEdges, e => e.Type == "calls" && e.Subtype == "constructor"
+                && e.Target == "widget");
+            Assert.Contains(runEdges, e => e.Type == "calls" && e.Subtype == "delegates");
+            Assert.Contains(runEdges, e => e.Type == "calls" && e.Subtype == "property-get"
+                && e.Target == "widget/value/get");
+
+            // A3 — the lambda's `new Widget()` inside `Each` attributes to the
+            // enclosing method element (lambdas are not their own element), NOT
+            // to `svc`. The Each key includes the list parameter sig.
+            var eachEdges = byElement
+                .Where(kv => kv.Key.StartsWith("svc/each"))
+                .SelectMany(kv => kv.Value)
+                .ToList();
+            Assert.Contains(eachEdges, e => e.Type == "calls" && e.Subtype == "constructor"
+                && e.Target == "widget");
         }
         finally { Directory.Delete(dir, true); }
     }

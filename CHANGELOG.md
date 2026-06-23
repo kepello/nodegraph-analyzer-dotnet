@@ -2,6 +2,31 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.49.0] — 2026-06-22
+
+F1 .NET-sibling — type/container elements no longer emit duplicate `calls` edges (constructor / delegates / property-access) mirroring their members' bodies; method → local-function invocation duplication also fixed. Calls are now attributed to the innermost enclosing element node (own-body ownership). Mirrors analyzer-ts 0.46.0; found via the SCIP differential-oracle spike. Fathom row 3.1.1.1.9.1b-F1.
+
+### Fixed
+
+- `src/Program.cs` — `ExtractRelationships`: added `OwnsCallSite(SyntaxNode site)` local helper — walks from `site.Parent` toward the root and returns `true` only when the first enclosing element node IS the current `node` (reference identity; Roslyn red nodes are stable per tree). The `elementNodes` dictionary (the `canonicalByNode` map keyed by element syntax nodes) is passed in as a new required parameter so the helper can test membership without re-deriving the set.
+- `src/Program.cs` — `ExtractRelationships` signature: added `Dictionary<SyntaxNode, (string Name, string QualifiedRaw)> elementNodes` parameter (required, not nullable — no silent-degradation). Call site at `Program.cs:591` updated.
+- `src/Program.cs` — object-creation sweep (`ObjectCreationExpressionSyntax`): added `if (!OwnsCallSite(creation)) continue;` at the top of the loop body. Previously UNGUARDED — emitted `calls`/`constructor` from any container element whose `DescendantNodes()` reached into member bodies.
+- `src/Program.cs` — delegate-assignment sweep (`AssignmentExpressionSyntax` / `+=`): added `if (!OwnsCallSite(assign)) continue;`. Previously UNGUARDED — emitted `calls`/`delegates` from container elements.
+- `src/Program.cs` — property/element-access sweep (`MemberAccessExpressionSyntax` / `ElementAccessExpressionSyntax`): added `if (!OwnsCallSite(access)) continue;`. Previously UNGUARDED — emitted `calls`/`property-get`|`property-set` from container elements.
+- `src/Program.cs` — invocation sweep (inside the `MethodDeclarationSyntax || LocalFunctionStatementSyntax` guard): added `if (!OwnsCallSite(invocation)) continue;`. This guard already prevented class-level duplication, but a method containing a local function (which is its own element) would double-count the local function's invocations onto the enclosing method. Now correctly attributed to the local function only.
+
+### No migration
+
+Pre-prod — delete `.fathom/graph.db` and re-analyze to refresh the graph. Previously emitted `calls` edges sourced from class/type elements that belong only to the member methods are now absent; any stored edges from those sources are invalid and will not regenerate.
+
+### Tests
+
+One new RED-witnessed regression fixture in `tests/CallResolutionIntegrationTests.cs`:
+- `OwnBodyOwnership_ClassDoesNotDuplicateMemberBodyEdges` — witnessed RED (assertion `DoesNotContain` failed: `svc` element had `calls/constructor:widget`, `calls/delegates`, `calls/property-get:widget/value/get`); GREEN after fix. Covers all three failure categories (constructor duplication, delegate duplication, property-get duplication) plus the lambda-attribution preservation assertion (A3). Helper `AnalyzeEdgesPerElement` added to collect edges keyed by element name (enabling per-element attribution assertions).
+- Analyzer 226 pass (was 225; +1 new test).
+
+---
+
 ## [0.48.0] — 2026-06-12
 
 Stateful per-line classifier — verbatim-string and block-comment interior lines now classified correctly. Closes Fathom row 3.1.1.1.9.1c `l1-loc-classifier-prefix-only-string-block`.
