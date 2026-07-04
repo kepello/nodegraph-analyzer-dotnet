@@ -280,12 +280,33 @@ internal static class SemanticCatalog
     /// (the SAME kebab-canonical string the analyzer emits as the external
     /// edge's <c>targetName</c>) matches a persistence namespace prefix.
     /// Mirrors dataaccess-surface.ts's <c>storeFor</c> + WRITE_OPS/READ_OPS
-    /// substring match; per-edge (not per-element aggregate), so the
-    /// engine's read+write→"mixed" case has no single-edge analogue — write
-    /// takes precedence over read when a single target string happens to
-    /// contain both substrings, matching the engine's own
-    /// <c>write ? "write" : read ? "read" : "unknown"</c> ternary precedence
-    /// (the "unknown" case is the honest absence of the optional field).
+    /// substring match.
+    ///
+    /// The DELETED engine tracked <c>read</c>/<c>write</c> as two INDEPENDENT
+    /// booleans, OR'd across every qualifying edge of the element, then
+    /// resolved with <c>read &amp;&amp; write ? "mixed" : write ? "write" :
+    /// read ? "read" : "unknown"</c> — so a single edge whose target
+    /// matched BOTH lists set both booleans from that one edge alone.
+    /// `executenonquery` (a WRITE_OPS entry) contains the substring `query`
+    /// (a READ_OPS entry), so a lone `ExecuteNonQuery` call — with no other
+    /// persistence edge on the element — used to read `read=true` AND
+    /// `write=true` from itself, classifying "mixed": a substring-collision
+    /// artifact, not a real mixed-access element. (Same collision family:
+    /// `DbCommandBuilder.Get*Command` — `get` (READ_OPS) inside
+    /// `getinsertcommand`/`getupdatecommand`/`getdeletecommand`.)
+    ///
+    /// This analyzer classifies PER EDGE, write-wins (no independent
+    /// booleans): if the target matches WRITE_OPS, `operation = "write"`
+    /// unconditionally — READ_OPS is only consulted when WRITE_OPS didn't
+    /// match. This is an ACCEPTED, NOT parity-restored, delta — sanctioned
+    /// delta #4 (Fathom boundary-drift wave 3.4.1, reviewer finding
+    /// 2026-07-04): the new per-edge value is more correct (a pure
+    /// `ExecuteNonQuery` call IS a write, not "mixed"), and the engine-side
+    /// cross-edge aggregation (dataaccess-surface.ts v2) now has its own
+    /// `mixed` case reserved for a REAL two-edge (one read op, one write
+    /// op) element — corpus-sized: 135 EnvisionWeb elements flip
+    /// mixed→write (1,954→2,089 write / 346→211 mixed). The "unknown" case
+    /// is the honest absence of the optional field.
     /// Returns null when the target matches no persistence namespace.
     /// </summary>
     internal static Dictionary<string, object?>? ClassifyApiCategory(string canonicalTarget)
@@ -404,16 +425,28 @@ internal static class SemanticCatalog
         return bare.Length > 0 ? bare : null;
     }
 
+    // NOTE (Fathom boundary-drift wave 3.4.1, fix round 2026-07-04, parity
+    // fix D): the deleted engine tables (interaction-surface.ts's
+    // CONTROL_KIND_RULES) were JS RegExp literals, where `\w` is ALWAYS
+    // `[A-Za-z0-9_]` (ASCII-only — JS has no Unicode-`\w` mode without the
+    // `/u` + `\p{...}` escape, which the deleted table never used). .NET's
+    // `\w` defaults to matching ANY Unicode word character (category
+    // Nd/Nl/Pc/L*), so a non-ASCII type name segment (e.g. a transliterated
+    // or accented identifier) would classify here where the old engine's
+    // ASCII-only `\w` would not — a byte-for-byte parity break. `RegexOptions
+    // .ECMAScript` restores the JS-parity ASCII-only `\w` (legal combined
+    // with `IgnoreCase` only — the sole other option every rule already
+    // uses).
     private static readonly (Regex Pattern, string ControlKind)[] ControlKindRules =
     {
-        (new Regex(@"(?:^|\.)\w*Button$", RegexOptions.IgnoreCase), "button"),
-        (new Regex(@"(?:^|\.)(?:Label|Literal|HtmlGenericControl)$", RegexOptions.IgnoreCase), "label"),
-        (new Regex(@"(?:^|\.)(?:\w*Grid(?:View)?|Repeater|DataList|ListView)$", RegexOptions.IgnoreCase), "grid"),
-        (new Regex(@"(?:^|\.)(?:HyperLink|HtmlAnchor)$", RegexOptions.IgnoreCase), "link"),
-        (new Regex(@"(?:^|\.)(?:Image|HtmlImage)$", RegexOptions.IgnoreCase), "image"),
-        (new Regex(@"(?:^|\.)(?:\w*TextBox|\w*ComboBox|DropDownList|ListBox|CheckBox\w*|RadioButton\w*|\w*DatePicker|\w*Input\w*|HtmlSelect|FileUpload|Calendar)$", RegexOptions.IgnoreCase), "form-field"),
-        (new Regex(@"(?:^|\.)(?:Panel|PlaceHolder|UpdatePanel|MultiView|View|Content|HtmlForm)$", RegexOptions.IgnoreCase), "container"),
-        (new Regex(@"Validator$", RegexOptions.IgnoreCase), "validation"),
+        (new Regex(@"(?:^|\.)\w*Button$", RegexOptions.IgnoreCase | RegexOptions.ECMAScript), "button"),
+        (new Regex(@"(?:^|\.)(?:Label|Literal|HtmlGenericControl)$", RegexOptions.IgnoreCase | RegexOptions.ECMAScript), "label"),
+        (new Regex(@"(?:^|\.)(?:\w*Grid(?:View)?|Repeater|DataList|ListView)$", RegexOptions.IgnoreCase | RegexOptions.ECMAScript), "grid"),
+        (new Regex(@"(?:^|\.)(?:HyperLink|HtmlAnchor)$", RegexOptions.IgnoreCase | RegexOptions.ECMAScript), "link"),
+        (new Regex(@"(?:^|\.)(?:Image|HtmlImage)$", RegexOptions.IgnoreCase | RegexOptions.ECMAScript), "image"),
+        (new Regex(@"(?:^|\.)(?:\w*TextBox|\w*ComboBox|DropDownList|ListBox|CheckBox\w*|RadioButton\w*|\w*DatePicker|\w*Input\w*|HtmlSelect|FileUpload|Calendar)$", RegexOptions.IgnoreCase | RegexOptions.ECMAScript), "form-field"),
+        (new Regex(@"(?:^|\.)(?:Panel|PlaceHolder|UpdatePanel|MultiView|View|Content|HtmlForm)$", RegexOptions.IgnoreCase | RegexOptions.ECMAScript), "container"),
+        (new Regex(@"Validator$", RegexOptions.IgnoreCase | RegexOptions.ECMAScript), "validation"),
     };
 
     /// <summary>

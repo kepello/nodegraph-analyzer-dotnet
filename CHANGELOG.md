@@ -2,6 +2,27 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.52.0] — 2026-07-04
+
+**Boundary-drift wave fix round — two-gate findings on the analyzer-side semantic-catalog port (3.4.1).** Four fixes: a real corpus-confirmed regression, a reviewer-accepted sanctioned delta (documented + pinned, not parity-restored), a silent-pass test-observability gap, and a JS-vs-.NET regex parity fix.
+
+### Fixed
+
+- **`generatedSignals` missing on designer FILE elements** (`Program.cs`, `BuildArtifact`) — the deleted engine's `.designer.cs` DESIGNER_SUFFIX check had no kind gate; it ran over EVERY element whose artifact path matched, including the file element itself (`is-generated.ts`: "the file node, the class, and each member ... are all generated"). The port originally called `SemanticCatalog.ClassifyGeneratedSignals` only per declaration, silently dropping the file element's signal — EnvisionWeb `isGenerated` regressed 10,301 → 10,057 (−244 = the designer file elements). Now also stamped on the artifact object itself (`artifact["generatedSignals"]`), computed the same way with an empty raw-annotation list so only the filename-suffix check applies — the exact `"designer-filename"` signal string the catalog already uses for declarations.
+- **`CONTROL_KIND_RULES` `\w` Unicode-vs-ASCII parity** (`Program.SemanticCatalog.cs`) — the deleted engine's tables were JS `RegExp` literals, where `\w` is ASCII-only (`[A-Za-z0-9_]`); .NET's `\w` defaults to Unicode word characters. Added `RegexOptions.ECMAScript` to every `ControlKindRules` pattern (legal alongside the existing `IgnoreCase`) so a non-ASCII type-name segment classifies identically to the deleted JS table (byte-for-byte parity), not as a false-positive control-kind match.
+
+### Changed
+
+- **`ClassifyApiCategory` read/write rationale comment corrected + sanctioned delta #4 documented** (`Program.SemanticCatalog.cs`) — the doc comment previously MIS-QUOTED the deleted engine's formula, dropping the leading `read && write ? "mixed"` term. Rewritten to quote the real formula and explicitly record the accepted, NOT parity-restored, delta: the deleted engine tracked `read`/`write` as independent booleans OR'd across an element's edges, so a lone `ExecuteNonQuery` edge (`executenonquery` — a WriteOps entry — contains the substring `query`, a ReadOps entry) set both booleans from itself and classified "mixed" (a substring-collision artifact; same family: `DbCommandBuilder.Get*Command`). This analyzer's per-edge, write-wins classification resolves the same shape to "write" — sanctioned delta #4 (reviewer finding 2026-07-04); corpus-sized: 135 EnvisionWeb elements flip mixed→write (1,954→2,089 write / 346→211 mixed).
+- **`ApiCategory_AdoNet_ReadAndWrite_OnExternalCallsEdges` skip is now observable** (`tests/SemanticCatalogEmissionTests.cs`) — the test's two bare `return`s made it pass-green asserting nothing in offline environments. The `dotnet restore`-failure path now writes a distinct message to test output via `ITestOutputHelper` (still skips — genuinely not exercisable offline). The zero-edges path (restore succeeded, MSBuildWorkspace resolved no `calls` edges) now `Assert.True`-fails instead of silently returning — a successful restore means the environment IS exercisable, so zero edges is a real coverage gap, not a skip condition.
+
+### Tests
+
+- New `tests/SemanticCatalogTests.cs` (linked `Program.SemanticCatalog.cs` directly into the test project, mirroring `NamingTests`'s pattern) — 5 direct unit tests: `ClassifyApiCategory` × ExecuteNonQuery-writes / read / non-persistence-null, `MapControlKind` × non-ASCII-no-match / ASCII-still-matches.
+- `GeneratedSignals_AttributeAndDesignerFilename` (`tests/SemanticCatalogEmissionTests.cs`) extended with a new `AnalyzeArtifact` harness helper (returns the raw artifact JSON, not just its `elements`) and two new assertions: the designer file's own artifact carries `generatedSignals: ["designer-filename"]`; the non-designer file's artifact carries no `generatedSignals` at all (honest absence, not `[]`). RED confirmed first: `Assert.NotNull()` failure (`designerArtifact` had no `generatedSignals` property) against the pre-fix `Program.cs`; green after.
+- `MapControlKind_NonAsciiTypeSegment_DoesNotMatchAsciiOnlyRule` — RED confirmed first against the pre-fix `Program.SemanticCatalog.cs` (`Assert.Equal() Failure: Expected: "other" Actual: "button"` for `"MyNamespace.PörButton"`); green after the `RegexOptions.ECMAScript` fix.
+- Suite: **246 pass** (was 241; +5).
+
 ## [0.51.0] — 2026-07-04
 
 **Chunk 7 of the boundary-drift correction wave (Fathom row `conformance-enum-language-leak-reconcile`, folded into 3.4.1) — entry-point kind rename.**

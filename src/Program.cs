@@ -378,6 +378,22 @@ static object? BuildArtifact(
     if (problems.Length > 0) artifact["problems"] = problems;
     if (limitations.Length > 0) artifact["limitations"] = limitations;
 
+    // generatedSignals on the FILE element itself (Fathom row boundary-drift
+    // correction, 3.4.1, fix round 2026-07-04). is-generated.ts's deleted
+    // DESIGNER_SUFFIX check had no kind gate — it ran over EVERY element
+    // whose artifact path ended `.designer.cs`, including the file node
+    // itself ("the file node, the class, and each member ... are all
+    // generated"). The port originally stamped only declaration elements
+    // (SemanticCatalog.ClassifyGeneratedSignals called per-declaration
+    // below), silently dropping the file element's signal — EnvisionWeb
+    // isGenerated regressed 10,301 -> 10,057 (-244 = the designer file
+    // elements). No annotations apply to a file, so pass an empty
+    // raw-annotation list; ClassifyGeneratedSignals still runs its
+    // filename-suffix check against `filePath` and returns the same
+    // "designer-filename" signal string the catalog uses for declarations.
+    var fileGeneratedSignals = SemanticCatalog.ClassifyGeneratedSignals(Array.Empty<string>(), filePath);
+    if (fileGeneratedSignals != null) artifact["generatedSignals"] = fileGeneratedSignals;
+
     if (includeComments)
     {
         var fileLeading = ExtractFileLeadingComment(content);

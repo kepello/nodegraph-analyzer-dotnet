@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using Xunit.Abstractions;
 
 namespace NodegraphAnalyzerDotnet.Tests;
 
@@ -16,6 +17,13 @@ namespace NodegraphAnalyzerDotnet.Tests;
 /// </summary>
 public class SemanticCatalogEmissionTests
 {
+    private readonly ITestOutputHelper _output;
+
+    public SemanticCatalogEmissionTests(ITestOutputHelper output)
+    {
+        _output = output;
+    }
+
     // ---------- harness ----------
 
     private static string? AnalyzerDll()
@@ -81,6 +89,49 @@ public class SemanticCatalogEmissionTests
 
     private static JsonElement ElementNamed(List<JsonElement> elements, Func<string, bool> predicate) =>
         elements.First(el => predicate(el.TryGetProperty("name", out var n) ? n.GetString() ?? "" : ""));
+
+    /// <summary>Run the analyzer on <paramref name="dir"/>; return the raw
+    /// (cloned) artifact JsonElement itself (not its <c>elements</c>) for
+    /// the artifact whose id ends with <paramref name="fileSuffix"/> — the
+    /// wire-protocol's file-level element (see
+    /// <c>AnalyzerArtifact</c>/<c>ingestArtifact</c> in nodegraph-analysis:
+    /// "the artifact itself is also an element (kind = file)").</summary>
+    private static JsonElement? AnalyzeArtifact(string dir, string fileSuffix)
+    {
+        var dll = AnalyzerDll();
+        Assert.True(dll != null, "analyzer DLL not built — run `dotnet build src -c Debug`");
+        var psi = new ProcessStartInfo("dotnet")
+        {
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        psi.ArgumentList.Add(dll!);
+        psi.ArgumentList.Add("--path");
+        psi.ArgumentList.Add(dir);
+        using var proc = Process.Start(psi)!;
+        proc.StandardInput.Write("{}");
+        proc.StandardInput.Close();
+        var stdout = proc.StandardOutput.ReadToEnd();
+        proc.WaitForExit(60_000);
+
+        foreach (var line in stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            JsonDocument doc;
+            try { doc = JsonDocument.Parse(line); } catch { continue; }
+            using (doc)
+            {
+                var root = doc.RootElement;
+                if (!root.TryGetProperty("type", out var t) || t.GetString() != "artifact") continue;
+                var artifact = root.GetProperty("artifact");
+                var id = artifact.TryGetProperty("id", out var idEl) ? idEl.GetString() ?? "" : "";
+                if (!id.Replace('\\', '/').EndsWith(fileSuffix)) continue;
+                return artifact.Clone();
+            }
+        }
+        return null;
+    }
 
     private static JsonElement? TryProp(JsonElement el, string name) =>
         el.TryGetProperty(name, out var v) ? v : null;
@@ -470,6 +521,27 @@ public partial class Companion {
             var designerSignals = TryProp(fromDesigner, "generatedSignals");
             Assert.NotNull(designerSignals);
             Assert.Equal(new[] { "designer-filename" }, StringArray(designerSignals!.Value));
+
+            // The FILE element itself (the artifact — wire-protocol's
+            // kind="file" element, per AnalyzerArtifact's doc comment) also
+            // carries the designer-filename signal: the old engine's
+            // DESIGNER_SUFFIX check ran over EVERY element whose artifact
+            // path matched, including the file node (no kind gate — see
+            // is-generated.ts's "the file node, the class, and each member
+            // ... are all generated"). Regression: the port originally
+            // stamped only declaration elements, dropping the file element's
+            // signal (EnvisionWeb isGenerated 10,301 → 10,057, -244).
+            var designerArtifact = AnalyzeArtifact(dir, "Widget.Designer.cs");
+            Assert.NotNull(designerArtifact);
+            var fileSignals = TryProp(designerArtifact!.Value, "generatedSignals");
+            Assert.NotNull(fileSignals);
+            Assert.Equal(new[] { "designer-filename" }, StringArray(fileSignals!.Value));
+
+            // The non-designer file's artifact carries NO generatedSignals —
+            // absence of evidence stays an honest absent field, not `[]`.
+            var normalArtifact = AnalyzeArtifact(dir, "Widget.cs");
+            Assert.NotNull(normalArtifact);
+            Assert.Null(TryProp(normalArtifact!.Value, "generatedSignals"));
         }
         finally { Directory.Delete(dir, true); }
     }
@@ -486,6 +558,16 @@ public partial class Companion {
     // network restore not assumed available in this sandbox; DataTable /
     // DataRowCollection are real members of the SAME "system-data" (ado-net)
     // namespace prefix, so the classification exercised is byte-identical.
+    //
+    // Host-conditional: skipped (early return) ONLY when `dotnet restore`
+    // itself fails (offline host without local reference packs) — same
+    // policy as FrameworkReferenceResolver's / WebFormsCompanionIntegration's
+    // host-conditional tests. That skip is OBSERVABLE (a message to test
+    // output naming the exact reason) — never a silent green. A successful
+    // restore that then resolves ZERO calls edges is NOT a skip condition
+    // (restore succeeding means the environment IS exercisable) — it's a
+    // real assertion failure, so the classification logic stays covered on
+    // every host where `dotnet restore` can reach the local ref-pack cache.
     // ===================================================================
 
     [Fact]
@@ -500,8 +582,26 @@ public class Repo {
 }"));
         try
         {
-            if (!TryRestore(dir, "Repo.csproj")) return; // offline host without local ref packs — not exercisable
+            if (!TryRestore(dir, "Repo.csproj"))
+            {
+                // Offline host without local reference packs — not
+                // exercisable. Observable skip: a distinct message on every
+                // run, not a bare silent pass.
+                _output.WriteLine(
+                    "SKIPPED ApiCategory_AdoNet_ReadAndWrite_OnExternalCallsEdges: " +
+                    "`dotnet restore` failed for the Repo fixture (offline host / " +
+                    "no local reference-pack cache) — apiCategory read/write " +
+                    "classification NOT exercised this run.");
+                return;
+            }
             var edges = AnalyzeCallsEdges(dir, "Repo.cs");
+            Assert.True(
+                edges.Count > 0,
+                "restore succeeded but MSBuildWorkspace resolved ZERO calls " +
+                "edges for Repo.cs — this is a real failure (not an offline " +
+                "skip: the restore that would gate a skip already succeeded), " +
+                "the apiCategory classification below would otherwise assert " +
+                "against an empty list and pass green with no coverage.");
             if (edges.Count == 0) return; // MSBuildWorkspace couldn't load the project in this environment
 
             Assert.Contains(edges, e => e.Target.Contains("datarowcollection") && e.Target.Contains("add")

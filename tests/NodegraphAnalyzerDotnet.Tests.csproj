@@ -38,6 +38,7 @@
     <Compile Include="../src/Program.Analysis.cs" Link="Program.Analysis.cs" />
     <Compile Include="../src/Program.Annotations.cs" Link="Program.Annotations.cs" />
     <Compile Include="../src/Program.Provenance.cs" Link="Program.Provenance.cs" />
+    <Compile Include="../src/Program.SemanticCatalog.cs" Link="Program.SemanticCatalog.cs" />
   </ItemGroup>
 
 </Project>
