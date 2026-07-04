@@ -2,6 +2,28 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.50.0] — 2026-07-04
+
+**Boundary-drift correction, analyzer-side half** — the analyzer now emits the .NET framework vocabulary as facets instead of leaving it to the shared L1 engine's hard-coded tables (Fathom row `boundary-drift-correction` 3.4.1, chunk 3). Ported VERBATIM from six `nodegraph-analysis` derivation modules (`stereotypes.ts`, `integration-surface.ts`, `dataaccess-surface.ts`, `interaction-surface.ts`, `serialization-surface.ts`, `is-generated.ts`) — same base-type sets, attribute maps, and match precedence, not "improved" (better symbol-based matching stays a filed residual). This is emission-only: the engine still derives these facts from its own tables today; it consumes the new analyzer-emitted facets in a coordinated `nodegraph-analysis` release. Delete `.fathom/graph.db` (or bump the epoch) and re-analyze to pick up the new facets once that release lands — no migration path, pre-prod.
+
+### Added
+
+- `src/Program.SemanticCatalog.cs` — new partial hosting the ported tables + classification helpers: `BoundaryBaseTypes`/`CollectionBaseTypes`/`RootErrorBaseTypes` (stereotypes.ts), `EndpointAttrs`/`HostAttrs`/`ContractAttrs`/`HttpVerbAttrs` (integration-surface.ts), `StoreNamespaces`/`WriteOps`/`ReadOps` (dataaccess-surface.ts), `UiBases`/`LifecycleByName`/`ControlKindRules` (interaction-surface.ts), `FormatByAttr` (serialization-surface.ts), `GeneratedSignalByAttr`/`DesignerSuffix` (is-generated.ts).
+- Element facet `baseTypeRoles` — `{role: "boundary"|"collection"|"error", source}[]` classified over the existing `baseTypes` facet. Contract: any element carrying `baseTypes` also carries `baseTypeRoles` (possibly `[]`).
+- Element facet `integrationRole` — `{kind, protocol, framework, operation?, verb?}`, endpoint > HTTP-verb > contract > host precedence over the element's own annotations.
+- Element facet `interactionRole` — `{entryKind, framework}` class-level skeleton from `UI_BASES` needle-matching over `baseTypes`.
+- Element facets `uiLifecycle` / `uiTriggers` — pure name-match (WebForms lifecycle names + the `btnSave_Click` auto-wired convention), deliberately ungated (the engine keeps the UI-parent-class structural gate on its own read).
+- Element facet `serializationFormats` — deduped + sorted wire formats from the element's annotations, gated to type-like/member-like element kinds.
+- Element facet `generatedSignals` — attribute-derived signals plus the `.designer.cs` filename convention.
+- Edge metadata `apiCategory` (`{domain: "persistence", store, operation?}`) on external `calls` edges whose canonical target matches a persistence namespace prefix (`AddExternal`, `Program.cs`).
+- Edge metadata `controlKind` alongside the existing `controlType` on generated-companion `accessesField` edges (companion control-field binding, `Program.cs`).
+
+### Tests
+
+New `tests/SemanticCatalogEmissionTests.cs` — 14 spawn-based fixtures, one per family, each pinned to the engine table row it exercises (`baseTypeRoles` × boundary/collection/error/no-match, `integrationRole` × asmx/wcf/webapi-verb, `interactionRole` + `uiLifecycle` on a WebForms `Page_Load`, `uiTriggers` on an auto-wired `btnSave_Click`, `controlKind` on a synthesized WebForms markup-companion binding (host-conditional on the net472 reference-assembly pack), `serializationFormats` × json/data-contract/runtime-serializable + a non-participating-kind control, `generatedSignals` × attribute + `.designer.cs` filename, `apiCategory` × ado-net read/write via a real MSBuild-project `System.Data.DataTable` fixture (bare-directory mode only references corelib, which doesn't carry `System.Data` — SqlClient/EF NuGet packages need a network restore not assumed available, so `DataTable`/`DataRowCollection` stand in as genuine members of the SAME `system-data` namespace prefix)). All 13 non-control-fixture tests witnessed RED against the pre-fix analyzer before the fix; GREEN after. Full analyzer suite 240 pass (was 226; +14 new tests).
+
+---
+
 ## [0.49.0] — 2026-06-22
 
 F1 .NET-sibling — type/container elements no longer emit duplicate `calls` edges (constructor / delegates / property-access) mirroring their members' bodies; method → local-function invocation duplication also fixed. Calls are now attributed to the innermost enclosing element node (own-body ownership). Mirrors analyzer-ts 0.46.0; found via the SCIP differential-oracle spike. Fathom row 3.1.1.1.9.1b-F1.

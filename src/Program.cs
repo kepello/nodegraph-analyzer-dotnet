@@ -781,12 +781,18 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
                             // declared type — null only if the member somehow
                             // isn't a field (never for companions today).
                             companionFieldTypes.TryGetValue(memberKey, out var controlType);
+                            // controlKind (Fathom row boundary-drift-correction
+                            // 3.4.1 chunk 3): interaction-surface.ts's
+                            // CONTROL_KIND_RULES mapped over the same
+                            // controlType, mirroring the existing controlType
+                            // emission pattern above.
+                            var controlKind = SemanticCatalog.MapControlKind(controlType);
                             if (subtype is null)
                                 rels.Add(new
                                 {
                                     type = edgeType,
                                     targetName = qualifiedTarget,
-                                    metadata = new { external = true, resolutionProvenance = ProvenanceHelpers.GeneratedCompanion, controlType },
+                                    metadata = new { external = true, resolutionProvenance = ProvenanceHelpers.GeneratedCompanion, controlType, controlKind },
                                 });
                             else
                                 rels.Add(new
@@ -794,7 +800,7 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
                                     type = edgeType,
                                     subtype,
                                     targetName = qualifiedTarget,
-                                    metadata = new { external = true, resolutionProvenance = ProvenanceHelpers.GeneratedCompanion, controlType },
+                                    metadata = new { external = true, resolutionProvenance = ProvenanceHelpers.GeneratedCompanion, controlType, controlKind },
                                 });
                             continue;
                         }
@@ -1197,6 +1203,67 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
             var leadingComment = ExtractElementLeadingComment(node);
             if (leadingComment != null) element["leadingComment"] = leadingComment;
         }
+
+        // Fathom row boundary-drift-correction (3.4.1, chunk 3) — analyzer-
+        // emitted semantic facets porting the L1 engine's .NET framework
+        // vocabulary tables (see Program.SemanticCatalog.cs; PORTED VERBATIM,
+        // not improved — better symbol-based matching is a filed residual).
+        // The engine consumes these facets after lowercasing where its own
+        // tables already lowercase (baseTypeRoles); the others replicate the
+        // engine's own case-sensitive substring/name-match semantics exactly.
+        var rawAnnotationNames = annotationResult?.Annotations
+            .Select(a => a.TryGetValue("name", out var n) ? n as string : null)
+            .Where(n => n != null)
+            .Select(n => n!)
+            .ToList() ?? new List<string>();
+
+        // The engine's operationName/bareName helpers (integration-surface.ts,
+        // interaction-surface.ts) assume a `Class/Method(sig)` shaped `name`
+        // facet — split on `/` then `(` to strip the signature. THIS
+        // analyzer's canonical `name` instead dash-joins the whole signature
+        // in (no literal parens survive `Canonicalize`), so splitting on `(`
+        // is a no-op and would leak the parameter-type suffix into
+        // `operation`/lifecycle/trigger values. The A6 `bareName` facet
+        // (case-preserved, already signature-free — built from `qualifiedRaw`
+        // via the SAME split-on-`/`-then-`(` shape the engine assumes) is the
+        // correct source string; lowercased so it matches the engine's own
+        // lowercase-canonical-name assumption (LIFECYCLE_BY_NAME keys etc.).
+        // Same algorithm as the engine, correct input for THIS analyzer's
+        // name-canonicalization shape — not a matching-semantics change.
+        var bareNameLower = BareNameFrom(qualifiedRaw).ToLowerInvariant();
+
+        // baseTypeRoles — CONTRACT: any element that gets `baseTypes` MUST
+        // also get `baseTypeRoles` (possibly empty).
+        if (element.TryGetValue("baseTypes", out var baseTypesObj) && baseTypesObj is string[] baseTypesArr)
+        {
+            element["baseTypeRoles"] = SemanticCatalog.ClassifyBaseTypeRoles(baseTypesArr);
+
+            // interactionRole — class-level UI_BASES skeleton, same baseTypes list.
+            var interactionRole = SemanticCatalog.ClassifyInteractionRole(baseTypesArr);
+            if (interactionRole != null) element["interactionRole"] = interactionRole;
+        }
+
+        // integrationRole — single-object classification over this element's
+        // own annotations + name, applying the engine's endpoint > verb >
+        // contract > host precedence.
+        var integrationRole = SemanticCatalog.ClassifyIntegrationRole(rawAnnotationNames, bareNameLower);
+        if (integrationRole != null) element["integrationRole"] = integrationRole;
+
+        // uiLifecycle / uiTriggers — pure name-match (no UI-parent-class
+        // gate here; the engine keeps that structural gate on its own read
+        // of this facet, so an ungated emission is a safe, observable
+        // superset, never a silent narrowing).
+        var (uiLifecycle, uiTriggers) = SemanticCatalog.ClassifyUiLifecycle(bareNameLower);
+        if (uiLifecycle != null) element["uiLifecycle"] = uiLifecycle;
+        if (uiTriggers != null) element["uiTriggers"] = uiTriggers;
+
+        // serializationFormats — gated to type-like/member-like element kinds.
+        var serializationFormats = SemanticCatalog.ClassifySerializationFormats(elementKind, rawAnnotationNames);
+        if (serializationFormats != null) element["serializationFormats"] = serializationFormats;
+
+        // generatedSignals — attribute-derived signals + `.designer.cs` filename.
+        var generatedSignals = SemanticCatalog.ClassifyGeneratedSignals(rawAnnotationNames, filePath);
+        if (generatedSignals != null) element["generatedSignals"] = generatedSignals;
 
         elements.Add(element);
     }
@@ -1678,13 +1745,23 @@ static object[] ExtractRelationships(
         // metadata.resolutionProvenance (Fathom 5.0.80 / H2): the target is
         // observably non-in-source — tag WHY so a library boundary is
         // distinguishable from an analyzer bug without a source-read.
-        relationships.Add(new
+        var metadata = new Dictionary<string, object?>
         {
-            type,
-            subtype,
-            targetName = canonical,
-            metadata = new { external = true, resolutionProvenance = provenance },
-        });
+            ["external"] = true,
+            ["resolutionProvenance"] = provenance,
+        };
+        // apiCategory (Fathom row boundary-drift-correction 3.4.1 chunk 3):
+        // dataaccess-surface.ts's STORE_NAMESPACES/WRITE_OPS/READ_OPS match
+        // over the SAME canonical target string emitted as targetName above
+        // — only ever fires for `calls` edges (the only type AddExternal is
+        // invoked with today), mirroring the engine reading dangling `calls`
+        // edges' canonical target.
+        if (type == "calls")
+        {
+            var apiCategory = SemanticCatalog.ClassifyApiCategory(canonical);
+            if (apiCategory != null) metadata["apiCategory"] = apiCategory;
+        }
+        relationships.Add(new { type, subtype, targetName = canonical, metadata });
     }
 
     // Project-level resolver: try to resolve a syntax node to a cross-file
