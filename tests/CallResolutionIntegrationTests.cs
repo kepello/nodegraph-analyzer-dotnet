@@ -150,6 +150,81 @@ public class CallResolutionIntegrationTests
         return map;
     }
 
+    /// <summary>Run the analyzer and return (elementName → (entryPoint,
+    /// entryPointTrigger.framework)) for the artifact ending with
+    /// <paramref name="fileSuffix"/>.</summary>
+    private static Dictionary<string, (string? Kind, string? Framework)> AnalyzeEntryPointsWithTrigger(
+        string dir, string fileSuffix)
+    {
+        var dll = AnalyzerDll();
+        Assert.True(dll != null, "analyzer DLL not built");
+        var psi = new ProcessStartInfo("dotnet")
+        {
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        psi.ArgumentList.Add(dll!);
+        psi.ArgumentList.Add("--path");
+        psi.ArgumentList.Add(dir);
+        using var proc = Process.Start(psi)!;
+        proc.StandardInput.Write("{}");
+        proc.StandardInput.Close();
+        var stdout = proc.StandardOutput.ReadToEnd();
+        proc.WaitForExit(60_000);
+
+        var map = new Dictionary<string, (string?, string?)>();
+        foreach (var line in stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            JsonDocument doc;
+            try { doc = JsonDocument.Parse(line); } catch { continue; }
+            using (doc)
+            {
+                var root = doc.RootElement;
+                if (!root.TryGetProperty("type", out var t) || t.GetString() != "artifact") continue;
+                var artifact = root.GetProperty("artifact");
+                var id = artifact.TryGetProperty("id", out var idEl) ? idEl.GetString() ?? "" : "";
+                if (!id.Replace('\\', '/').EndsWith(fileSuffix)) continue;
+                if (!artifact.TryGetProperty("elements", out var elements)) continue;
+                foreach (var el in elements.EnumerateArray())
+                {
+                    var name = el.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
+                    string? ep = el.TryGetProperty("entryPoint", out var e) ? e.GetString() : null;
+                    string? framework = null;
+                    if (el.TryGetProperty("entryPointTrigger", out var trig) && trig.ValueKind == JsonValueKind.Object
+                        && trig.TryGetProperty("framework", out var fw))
+                    {
+                        framework = fw.GetString();
+                    }
+                    map[name] = (ep, framework);
+                }
+            }
+        }
+        return map;
+    }
+
+    [Fact]
+    public void EntryPoint_WcfServiceFile_IsRpcServiceWithWcfTrigger()
+    {
+        // E1 — a top-level public type declared in a `.svc.cs` source file
+        // classifies as the language-neutral `rpc-service` core kind (Fathom
+        // row conformance-enum-language-leak-reconcile, 3.4.2 — renamed from
+        // the language-specific `wcf-service`), with the framework detail
+        // carried on the `trigger` sub-facet instead of the core kind.
+        var dir = MakeTempTree(("MyService.svc.cs", @"
+public class MyService {
+    public void DoWork() { }
+}"));
+        try
+        {
+            var ep = AnalyzeEntryPointsWithTrigger(dir, "MyService.svc.cs");
+            Assert.Equal("rpc-service", ep.GetValueOrDefault("myservice").Kind);
+            Assert.Equal("wcf", ep.GetValueOrDefault("myservice").Framework);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
     [Fact]
     public void EntryPoint_PublicPropertyAccessors_AreLibraryExportMethod()
     {

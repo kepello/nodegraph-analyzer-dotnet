@@ -2591,17 +2591,21 @@ static (string Kind, Dictionary<string, object?>? Trigger, Dictionary<string, ob
         }
     }
 
-    // E1 — wcf-service: top-level public type declared in a `.svc.cs`
+    // E1 — rpc-service: top-level public type declared in a `.svc.cs`
     // source file. Per row 4.4.2.2 — PNE/PNP triage surfaced WCF
     // services as a distinct, file-path-detectable subset of the broad
-    // `service-class` heuristic. heuristicNote rides along for any
-    // residual signal interest.
+    // `service-class` heuristic. Core kind renamed from the language-
+    // specific `wcf-service` to `rpc-service` (Fathom row
+    // conformance-enum-language-leak-reconcile, 3.4.2); the WCF-specific
+    // detail moves to the `trigger` sub-facet instead of the core kind.
+    // heuristicNote rides along for any residual signal interest.
     if (node is TypeDeclarationSyntax wcfType
         && accessibility == "public"
         && filePath.EndsWith(".svc.cs", System.StringComparison.OrdinalIgnoreCase)
         && wcfType.Ancestors().OfType<TypeDeclarationSyntax>().FirstOrDefault() == null)
     {
-        return ("wcf-service", null, null, heuristicNote);
+        var trigger = new Dictionary<string, object?> { ["framework"] = "wcf" };
+        return ("rpc-service", trigger, null, heuristicNote);
     }
 
     // E1 — library-export: public type at namespace level. Heuristic note

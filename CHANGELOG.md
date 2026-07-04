@@ -2,6 +2,18 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.51.0] — 2026-07-04
+
+**Chunk 7 of the boundary-drift correction wave (Fathom row `conformance-enum-language-leak-reconcile`, folded into 3.4.1) — entry-point kind rename.**
+
+### Changed
+
+- **`DetectEntryPoint` E1 WCF heuristic** (`Program.cs`) — emits `"rpc-service"` instead of the language-specific `"wcf-service"` (renamed core value in `@kepello/nodegraph-analysis@3.41.0`'s `EntryPointKind`). The `.svc.cs`-file detection heuristic is unchanged; the framework detail moves to the `trigger` sub-facet (`entryPointTrigger: { framework: "wcf" }`) instead of living in the core kind — the honest slot the tuple shape already carried, not a new wire field.
+
+### Tests
+
+Suite: **241 pass** (was 240). RED confirmed first: the new `EntryPoint_WcfServiceFile_IsRpcServiceWithWcfTrigger` regression test (`tests/CallResolutionIntegrationTests.cs`) failed against the pre-rename build (`Assert.Equal() Failure: Expected: "rpc-service" Actual: "wcf-service"`) before the `Program.cs` edit; green after.
+
 ## [0.50.0] — 2026-07-04
 
 **Boundary-drift correction, analyzer-side half** — the analyzer now emits the .NET framework vocabulary as facets instead of leaving it to the shared L1 engine's hard-coded tables (Fathom row `boundary-drift-correction` 3.4.1, chunk 3). Ported VERBATIM from six `nodegraph-analysis` derivation modules (`stereotypes.ts`, `integration-surface.ts`, `dataaccess-surface.ts`, `interaction-surface.ts`, `serialization-surface.ts`, `is-generated.ts`) — same base-type sets, attribute maps, and match precedence, not "improved" (better symbol-based matching stays a filed residual). This is emission-only: the engine still derives these facts from its own tables today; it consumes the new analyzer-emitted facets in a coordinated `nodegraph-analysis` release. Delete `.fathom/graph.db` (or bump the epoch) and re-analyze to pick up the new facets once that release lands — no migration path, pre-prod.
