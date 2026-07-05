@@ -2251,17 +2251,39 @@ static object[] ExtractRelationships(
                 if (parent.ContainingType == null) continue;
                 var parentTypeName = parent.ContainingType.Name;
                 var parentMethodName = parent.Name;
-                // Param-sig matching `GetParamSignature` convention: (type1,type2)
-                // with spaces stripped + `/` → `-`. Use ToDisplayString for the
-                // Roslyn IParameterSymbol.Type — gives a canonical representation
-                // the substrate's tail-match can bridge to declaration-side keys.
+                // Resolve the parent's declaring syntax reference ONCE so the
+                // param signature AND the cross-file targetRef below are built
+                // from the SAME declaration (Fathom row
+                // dotnet-overrides-targetref-param-qualification 5.0.112). This
+                // used to rebuild the signature from the SYMBOL's
+                // `IParameterSymbol.Type.ToDisplayString()` — which fully-
+                // qualifies BCL/namespaced types (`System.EventArgs`) — while
+                // the target method element's own natural key is built by
+                // `NamingHelpers.GetParamSignature` from the DECLARATION SYNTAX
+                // (the short, source-written form, `EventArgs`). The two
+                // diverged on any BCL/namespaced parameter type, dangling the
+                // edge (121 of 166 `overrides` edges on EnvisionWeb). Reusing
+                // `GetParamSignature` — the single source of truth also used
+                // for element natural-key construction and intra-class
+                // `callsMethod` resolution (Fathom 5.0.68.1) — keeps the two
+                // byte-identical instead of duplicating the normalization.
+                var parentDeclRef = parent.DeclaringSyntaxReferences.FirstOrDefault();
+                var parentDeclSyntax = parentDeclRef?.GetSyntax();
                 string parentParamSig;
-                if (parent.Parameters.Length == 0)
+                if (parentDeclSyntax != null)
+                {
+                    parentParamSig = NamingHelpers.GetParamSignature(parentDeclSyntax);
+                }
+                else if (parent.Parameters.Length == 0)
                 {
                     parentParamSig = "()";
                 }
                 else
                 {
+                    // No declaring syntax (external/metadata method) — no
+                    // targetRef will be emitted below, so this only feeds the
+                    // informational `targetName`. Fall back to the symbol's
+                    // display form.
                     parentParamSig = "(" + string.Join(",", parent.Parameters.Select(p =>
                         p.Type.ToDisplayString().Replace("/", "-").Replace(" ", ""))) + ")";
                 }
@@ -2270,10 +2292,9 @@ static object[] ExtractRelationships(
                 if (string.IsNullOrEmpty(canonical)) continue;
                 if (!seenOverrides.Add(canonical)) continue;
 
-                // Resolve parent's declaring file for cross-file targetRef.
-                var parentTargetFile = parent.DeclaringSyntaxReferences
-                    .Select(r => r.SyntaxTree.FilePath)
-                    .FirstOrDefault();
+                // Resolve parent's declaring file for cross-file targetRef —
+                // the SAME declaring reference used for the param signature.
+                var parentTargetFile = parentDeclRef?.SyntaxTree.FilePath;
                 if (parentTargetFile == currentFilePath) parentTargetFile = null;
                 if (parentTargetFile != null && parentTargetFile.Contains("/node_modules/", StringComparison.Ordinal))
                 {

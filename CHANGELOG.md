@@ -2,6 +2,24 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.53.0] — 2026-07-06
+
+**`overrides` edge targetRef param-qualification mismatch — 73% of overrides edges dangled on EnvisionWeb** (Fathom row `dotnet-overrides-targetref-param-qualification` 5.0.112, probe-traced 2026-07-06).
+
+### Fixed
+
+- **`overrides` edge targetRef built from a different param-signature construction than the target method element's own natural key** (`Program.cs`, the `TypeDeclarationSyntax overrideContainer` block). The emitter rebuilt the overridden method's parameter signature BY HAND from the Roslyn symbol via `IParameterSymbol.Type.ToDisplayString()` — which fully-qualifies BCL/namespaced parameter types (`System.EventArgs`) — while the target method element's natural key is built by `NamingHelpers.GetParamSignature` from the DECLARATION SYNTAX, using the short, source-written type name (`EventArgs`). The two constructions diverged on any BCL/namespaced parameter type, so the emitted `targetRef` never matched a live node's key. Corpus-verified on EnvisionWeb: 121 of 166 (73%) `overrides` edges dangled, 116 of them at INTERNAL targets — the `OnInit(EventArgs)` override family alone (58 edges) dangled on `system-eventargs` vs the live node's `eventargs`. Fix: the overrides emitter now resolves the overridden method's declaring syntax (the same declaring reference used for the cross-file targetRef path) and calls `NamingHelpers.GetParamSignature` on it directly — the single source of truth already shared by element natural-key construction and intra-class `callsMethod` resolution (Fathom 5.0.68.1) — instead of duplicating the normalization from the symbol side. Methods with no declaring syntax (external/metadata parents) keep the symbol-based fallback for the informational `targetName`; those never carry a `targetRef` so they weren't part of the dangling population.
+- No other param-typed key construction shares the broken path — audited every `ToDisplayString()` call site in `Program.cs`; the other two (`ResolveExternalCallName`, `ResolveExternalPropertyName`) build labels for confirmed-EXTERNAL members that intentionally carry no `targetRef`, not internal resolution targets.
+
+### Corpus note
+
+This ships the fixture-level regression proof only. Re-measuring the EnvisionWeb corpus's dangling-edge count needs a destructive re-analyze of that external corpus — out of scope here (external corpora don't get re-analyzed as part of an analyzer fix); the corpus re-measure rides the next EnvisionWeb rebuild. No consumer migration needed: previously-dangling edges simply re-resolve on next analyze (delete `.fathom/graph.db` + re-analyze, pre-prod convention) — the emitted key SHAPE (`artifactId#name`) is unchanged, only previously-wrong VALUES for BCL/namespaced-param overrides now match.
+
+### Tests
+
+- New `tests/OverridesEdgeTests.cs` — two spawn-based fixtures pinning the resolvability contract (`overrides` edge `targetRef` byte-identical to the target element's own `naturalKey`): a BCL-typed parameter (`EventArgs`, the exact EnvisionWeb `AuthenticatedModalBase`/`OnInit` shape) and an INTERNAL namespaced parameter type (`MyApp.Events.CustomEventArgs` vs the source-written `CustomEventArgs`), pinning both qualification directions. Both RED confirmed first against the pre-fix `Program.cs` (`Assert.Equal()` failures reproducing the exact mismatch: `oninit-system-eventargs` vs `oninit-eventargs`; `render-myapp-events-customeventargs` vs `render-customeventargs`); green after.
+- Suite: **248 pass** (was 246; +2).
+
 ## [0.52.0] — 2026-07-04
 
 **Boundary-drift wave fix round — two-gate findings on the analyzer-side semantic-catalog port (3.4.1).** Four fixes: a real corpus-confirmed regression, a reviewer-accepted sanctioned delta (documented + pinned, not parity-restored), a silent-pass test-observability gap, and a JS-vs-.NET regex parity fix.
