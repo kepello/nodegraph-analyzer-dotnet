@@ -165,6 +165,56 @@ namespace App {
     }
 
     [Fact]
+    public void UsingSubstringAdjacentToSystemRoot_StaysUntaggedAndDangling()
+    {
+        // Negative pin (5.0.113 reviewer F1): `Systematic.*` starts with the
+        // literal characters "system" but is NOT a dash-segment match —
+        // canonicalized it's "systematic-foo", not "system-..." — so it must
+        // stay plainly dangling. A regression to a bare
+        // `StartsWith(root)` (dropping the `+ "-"` segment-boundary check in
+        // `SemanticCatalog.IsKnownExternalNamespace`) would silently
+        // over-tag this as external.
+        var dir = MakeTempTree(
+            ("File.cs", @"
+using Systematic.Foo;
+namespace App {
+    public class Widget { }
+}"));
+        try
+        {
+            var imports = AnalyzeImports(dir);
+            var edge = Assert.Single(imports, i => i.TargetName == "systematic-foo");
+            Assert.Null(edge.External);
+            Assert.Null(edge.ResolutionProvenance);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void UsingSubstringAdjacentToMicrosoftRoot_StaysUntaggedAndDangling()
+    {
+        // Negative pin (5.0.113 reviewer F1): `MicrosoftFoo.*` starts with
+        // the literal characters "microsoft" but is NOT a dash-segment
+        // match — canonicalized it's "microsoftfoo-bar", not
+        // "microsoft-..." — so it must stay plainly dangling. Same
+        // regression-class witness as the Systematic.* pin above.
+        var dir = MakeTempTree(
+            ("File.cs", @"
+using MicrosoftFoo.Bar;
+namespace App {
+    public class Widget { }
+}"));
+        try
+        {
+            var imports = AnalyzeImports(dir);
+            var edge = Assert.Single(imports, i => i.TargetName == "microsoftfoo-bar");
+            Assert.Null(edge.External);
+            Assert.Null(edge.ResolutionProvenance);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
     public void UsingAlias_ClassifiesByUnderlyingNamespace()
     {
         // `using Foo = System.Collections.Generic.Dictionary<string, int>;` —

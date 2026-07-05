@@ -2,6 +2,15 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.54.1] — 2026-07-06
+
+**Regression pins for the dash-segment-boundary check in `SemanticCatalog.IsKnownExternalNamespace`** (5.0.113 reviewer F1). The reviewer confirmed the boundary is currently correct — `Systematic.*` and `MicrosoftFoo.*` are rejected, not false-positively tagged external — but no fixture pinned it: a future "simplification" to a bare `StartsWith(root)` (dropping the `+ "-"` segment terminator) would pass every existing test while silently over-tagging any app-own namespace whose name happens to start with `system`/`microsoft`/etc.
+
+### Tests
+
+- Two new negative pins in `tests/ImportsExternalTaggingTests.cs`: `using Systematic.Foo;` and `using MicrosoftFoo.Bar;` → neither `imports` edge carries `metadata.external`/`resolutionProvenance`. Sensitivity witnessed: temporarily weakening the catalog's match to bare `StartsWith(root)` (dropping the segment terminator) made both new tests FAIL for the right reason (`Assert.Null()` — actual `True`, i.e. the edge got unexpectedly tagged external); restored, both green.
+- Suite: **255 pass** (was 253; +2).
+
 ## [0.54.0] — 2026-07-06
 
 **`using` directives now tag known-external namespaces — the 5.0.113 imports-resolution wave, C# leg** (Fathom row `imports-resolution-near-total-dangling` 5.0.113). The artifact-level `imports` edge carries no `targetRef` — a namespace is not a single declaring file, so it structurally cannot — which made EVERY `using` read as a plain dangling edge downstream (coupling metrics, callee surfaces), even though the overwhelming majority target the BCL/framework (`System.*`, `Microsoft.*`) and are honestly, permanently external. Corpus-measured 2026-07-06: ~11.8k EnvisionWeb `imports` edges, 0% resolved, dominated by `System.*`/`Microsoft.*`.
