@@ -580,4 +580,63 @@ internal static class SemanticCatalog
     /// no table key itself ends in "Attribute").</summary>
     private static string StripAttributeSuffix(string raw) =>
         raw.EndsWith("Attribute", StringComparison.Ordinal) ? raw[..^"Attribute".Length] : raw;
+
+    // ===================================================================
+    // Known-external namespace roots (Fathom row
+    // imports-resolution-near-total-dangling 5.0.113). The artifact-level
+    // `imports` edge (Program.cs, one per `using` directive) carries no
+    // targetRef — a namespace is not a single declaring file, so it cannot
+    // — which makes EVERY `using` read as a plain dangling edge downstream
+    // even though the overwhelming majority target the BCL/framework and are
+    // honestly, permanently external. Per the 3.4-wave analyzer-owned-
+    // vocabulary principle, the analyzer classifies against its OWN catalog;
+    // the engine stays vocabulary-free and just reads the resulting
+    // `metadata.external` + `resolutionProvenance` tag.
+    //
+    // Root set = System / Microsoft / Windows (the three BCL/platform roots
+    // this catalog didn't yet carry as bare namespace strings — the closest
+    // existing entries are FQN-qualified, e.g. `system.web.ui.page`) PLUS
+    // every distinct framework-namespace root this catalog's OTHER tables
+    // already encode — reused, not re-invented:
+    //   - BoundaryBaseTypes: xamarin.forms.*, uikit.*, android.*,
+    //     androidx.*, telerik.*  (system.*/microsoft.* also appear there,
+    //     already covered by the base set)
+    //   - StoreNamespaces: dapper (system.*/microsoft.* also appear there)
+    // Matched against the SAME kebab-lowercase canonical form
+    // (`NamingHelpers.Canonicalize`) the `imports` edge already emits as its
+    // `targetName` — prefix match on a full dash-segment (`system` or
+    // `system-...`), never a bare substring (so e.g. `systemic.foo` does not
+    // false-positive on `system`).
+    // ===================================================================
+
+    private static readonly string[] KnownExternalNamespaceRoots =
+    {
+        // Explicit BCL/platform roots (not otherwise present as bare
+        // namespace strings in this catalog's other tables).
+        "system", "microsoft", "windows",
+        // Reused from BoundaryBaseTypes' non-system/microsoft entries.
+        "xamarin", "uikit", "android", "androidx", "telerik",
+        // Reused from StoreNamespaces' non-system/microsoft entries.
+        "dapper",
+    };
+
+    /// <summary>
+    /// True when <paramref name="canonicalNamespace"/> (the SAME kebab-
+    /// canonical string the `imports` edge emits as its <c>targetName</c>)
+    /// is rooted at a known-external namespace — a prefix match on a full
+    /// dash-segment boundary, e.g. <c>system</c> or <c>system-collections-
+    /// generic</c>, never a bare substring. Unmatched (app-own) namespaces
+    /// return false — they stay plainly dangling; resolving them is parked
+    /// row 5.0.113.r2.
+    /// </summary>
+    internal static bool IsKnownExternalNamespace(string canonicalNamespace)
+    {
+        if (string.IsNullOrEmpty(canonicalNamespace)) return false;
+        foreach (var root in KnownExternalNamespaceRoots)
+        {
+            if (canonicalNamespace == root) return true;
+            if (canonicalNamespace.StartsWith(root + "-", StringComparison.Ordinal)) return true;
+        }
+        return false;
+    }
 }

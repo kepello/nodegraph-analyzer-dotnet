@@ -480,7 +480,38 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
             allNames.Add(nsName);
             var canonical = Canonicalize(nsName);
             if (!string.IsNullOrEmpty(canonical))
-                artifactEdges.Add(new { type = "imports", subtype = "using", targetName = canonical });
+            {
+                // Fathom row imports-resolution-near-total-dangling (5.0.113):
+                // `using` directives targeting a known-external namespace
+                // (BCL/framework, per the analyzer-owned SemanticCatalog —
+                // System/Microsoft/Windows + the catalog's existing
+                // framework-namespace knowledge) carry the same
+                // `metadata.external` + `resolutionProvenance` shape the
+                // calls/references external-edge path already established
+                // (5.0.80/H2), so downstream coupling/callee consumers can
+                // tell an honest external boundary from a dangling bug
+                // without a source-read. `usingDirective.Name` is already the
+                // UNDERLYING target for both alias (`using Foo = Ns.Type`)
+                // and static (`using static Ns.Type`) usings, so both
+                // classify by their underlying namespace for free — no
+                // special-casing needed here. Unmatched (app-own) namespaces
+                // are UNCHANGED — plainly dangling (honest; resolving them is
+                // parked row 5.0.113.r2).
+                if (SemanticCatalog.IsKnownExternalNamespace(canonical))
+                {
+                    artifactEdges.Add(new
+                    {
+                        type = "imports",
+                        subtype = "using",
+                        targetName = canonical,
+                        metadata = new { external = true, resolutionProvenance = ProvenanceHelpers.ExternalLibrary },
+                    });
+                }
+                else
+                {
+                    artifactEdges.Add(new { type = "imports", subtype = "using", targetName = canonical });
+                }
+            }
         }
     }
 

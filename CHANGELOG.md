@@ -2,6 +2,20 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.54.0] — 2026-07-06
+
+**`using` directives now tag known-external namespaces — the 5.0.113 imports-resolution wave, C# leg** (Fathom row `imports-resolution-near-total-dangling` 5.0.113). The artifact-level `imports` edge carries no `targetRef` — a namespace is not a single declaring file, so it structurally cannot — which made EVERY `using` read as a plain dangling edge downstream (coupling metrics, callee surfaces), even though the overwhelming majority target the BCL/framework (`System.*`, `Microsoft.*`) and are honestly, permanently external. Corpus-measured 2026-07-06: ~11.8k EnvisionWeb `imports` edges, 0% resolved, dominated by `System.*`/`Microsoft.*`.
+
+### Added
+
+- **`SemanticCatalog.IsKnownExternalNamespace`** (`Program.SemanticCatalog.cs`) — the analyzer-owned known-external-namespace-root catalog (the 3.4-wave analyzer-classifies-against-its-own-vocabulary principle; the engine stays vocabulary-free). Root set: `System` / `Microsoft` / `Windows` (the three BCL/platform roots the catalog didn't yet carry as bare namespace strings) plus every distinct framework-namespace root the catalog's OTHER tables already encode — reused, not re-invented: `Xamarin` / `UIKit` / `Android` / `AndroidX` / `Telerik` (from `BoundaryBaseTypes`) and `Dapper` (from `StoreNamespaces`). Matched against the same kebab-lowercase canonical form the `imports` edge already emits, on a full dash-segment boundary (never a bare substring).
+- **`imports` edges targeting a known-external namespace now carry `metadata.external: true` + `resolutionProvenance: "external-library"`** (`Program.cs`, the `using`-directive emission loop) — mirroring the `calls`/`references` external-edge shape already established (Fathom 5.0.80 / H2, `ProvenanceHelpers.ExternalLibrary`). `using Foo = System.Collections.Generic.Dictionary<...>` (alias) and `using static System.Math` (static) classify by their underlying namespace for free — `usingDirective.Name` is already the alias/static TARGET, not the directive's own surface form, so no special-casing was needed for either shape. Unmatched (app-own) namespace usings are UNCHANGED — they stay plainly dangling (honest; resolving them against in-corpus declaring files is parked row `csharp-using-own-namespace-resolution` 5.0.113.r2).
+
+### Tests
+
+- New `tests/ImportsExternalTaggingTests.cs` — 5 spawn-based fixtures: `using System;` / `using System.Collections.Generic;` → tagged external (one test, two assertions); `using Microsoft.AspNetCore.Something;` → tagged external; an app-own namespace using (`Envision.Services`) → NO external metadata (negative pin); an aliased using targeting `System.*` → tagged external by its underlying target; `using static System.Math;` → tagged external. RED confirmed first: 4 of 5 failed against the pre-fix `Program.cs` (`Assert.True(system.External, ...)` etc. — `metadata` absent entirely); the negative pin passed both before and after (unaffected by the fix), as expected.
+- Suite: **253 pass** (was 248; +5).
+
 ## [0.53.0] — 2026-07-06
 
 **`overrides` edge targetRef param-qualification mismatch — 73% of overrides edges dangled on EnvisionWeb** (Fathom row `dotnet-overrides-targetref-param-qualification` 5.0.112, probe-traced 2026-07-06).
