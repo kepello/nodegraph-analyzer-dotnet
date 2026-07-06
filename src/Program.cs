@@ -1623,6 +1623,7 @@ static string? GetDeclarationName(SyntaxNode node) => node switch
     ClassDeclarationSyntax c => c.Identifier.Text,
     InterfaceDeclarationSyntax i => i.Identifier.Text,
     StructDeclarationSyntax s => s.Identifier.Text,
+    RecordDeclarationSyntax r => r.Identifier.Text,
     EnumDeclarationSyntax e => e.Identifier.Text,
     MethodDeclarationSyntax m => m.Identifier.Text,
     PropertyDeclarationSyntax p => p.Identifier.Text,
@@ -1648,6 +1649,12 @@ static string? GetElementType(SyntaxNode node) => node switch
     ClassDeclarationSyntax => "class",
     InterfaceDeclarationSyntax => "interface",
     StructDeclarationSyntax => "struct",
+    // `record` / `record class` compiles to a CLR class; `record struct`
+    // compiles to a CLR struct. Both parse to the SAME Roslyn syntax type
+    // (RecordDeclarationSyntax) — disambiguated only by .Kind(), never by
+    // C# type (Fathom row dotnet-record-elements-not-emitted 5.0.124.2b).
+    RecordDeclarationSyntax r when r.Kind() == SyntaxKind.RecordStructDeclaration => "struct",
+    RecordDeclarationSyntax => "class",
     EnumDeclarationSyntax => "enum",
     MethodDeclarationSyntax => "method",
     PropertyDeclarationSyntax => "property",

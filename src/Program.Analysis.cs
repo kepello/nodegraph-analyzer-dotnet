@@ -364,6 +364,14 @@ static class AnalysisHelpers
                 role = "type";
                 typeKind = "struct";
                 break;
+            case RecordDeclarationSyntax recordDecl:
+                // `record` / `record class` → CLR class; `record struct` →
+                // CLR struct. Both share ONE Roslyn syntax type, disambiguated
+                // only by .Kind() (Fathom row dotnet-record-elements-not-emitted
+                // 5.0.124.2b).
+                role = "type";
+                typeKind = recordDecl.Kind() == SyntaxKind.RecordStructDeclaration ? "struct" : "class";
+                break;
             case EnumDeclarationSyntax:
                 role = "type";
                 typeKind = "enum";
@@ -418,6 +426,7 @@ static class AnalysisHelpers
 
         var flavors = new Dictionary<string, object?>();
         if (typeKind != null) flavors["typeKind"] = typeKind;
+        if (node is RecordDeclarationSyntax) flavors["isRecord"] = true;
 
         if (node is OperatorDeclarationSyntax opDecl)
         {

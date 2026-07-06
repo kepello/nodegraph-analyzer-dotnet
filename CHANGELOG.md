@@ -2,6 +2,23 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.55.0] — 2026-07-06
+
+**C# 9+ `record` / `record struct` declarations were invisible to the graph entirely** (Fathom row `dotnet-record-elements-not-emitted` 5.0.124.2b) — not mislabeled, never emitted at all. A coverage gap on a type-declaration form that's the norm in any modern .NET domain model (DTOs, domain events, CQRS commands/queries).
+
+### Fixed
+
+- **Three dispatch sites switched on Roslyn syntax-node TYPE with no `RecordDeclarationSyntax` case** — `GetElementType` (`Program.cs`) is the actual gate: `GetElementType(node) == null` skips a node before an element is ever created in the canonical-naming pass, and records fell to `_ => null`. `GetDeclarationName` (`Program.cs`) had the same gap (would have returned `null` too, a second trap left for whoever eventually widened the first gate). `MapToDeclarable` (`Program.Analysis.cs`) — the role/flavors/capabilities metadata shared with the TS analyzer's declarable vocabulary — also had no case, so `role` stayed null and no declarable metadata attached even once the element itself existed. All three now carry a `RecordDeclarationSyntax` case, disambiguated by `.Kind()` (confirmed empirically, not assumed): `SyntaxKind.RecordDeclaration` (`record` / `record class`, a CLR class) maps to `"class"`; `SyntaxKind.RecordStructDeclaration` (`record struct`, a CLR struct) maps to `"struct"`. `GetDeclarationName` uses `.Identifier.Text`, same as the existing class/struct cases. The walker itself (`root.DescendantNodes()`) needed no changes — it already visits every descendant generically and was only ever filtered by these two gates.
+
+### Added
+
+- **`flavors["isRecord"] = true`** (`Program.Analysis.cs`, `MapToDeclarable`) — a record now stays distinguishable from a plain class/struct once visible, rather than trading one coverage gap for a smaller kind-hiding one.
+
+### Tests
+
+- New `tests/RecordDeclarationTests.cs` — 4 spawn-based fixtures: a positional record class (`record Person(string Name, int Age)`) now emits a `"class"` element where pre-fix NONE existed; an explicit-body record class (`record class Point { int X { get; init; } }`) emits the type element plus its explicit member (`X`, `"property"`); a positional record struct (`record struct Coordinates(double Lat, double Lng)`) maps to `"struct"`, confirmed via both `kind` and the `metadata.flavors.typeKind` facet; a factual pin (not a fix) confirming positional record parameters (`Name`) surface as `"parameter"`-kind child elements via the pre-existing generic `ParameterSyntax` case — Roslyn represents primary-constructor params as `ParameterSyntax` in the syntax tree, not synthesized `PropertyDeclarationSyntax` (those only exist in the semantic model), so re-classifying them as properties needs semantic-model work and is out of scope for this coverage fix. RED confirmed first: 3 of 4 tests failed against the pre-fix build for the right reason (`Assert.True()` — "no element emitted" — zero elements, not a different error); green after.
+- Suite: **259 pass** (was 255; +4).
+
 ## [0.54.1] — 2026-07-06
 
 **Regression pins for the dash-segment-boundary check in `SemanticCatalog.IsKnownExternalNamespace`** (5.0.113 reviewer F1). The reviewer confirmed the boundary is currently correct — `Systematic.*` and `MicrosoftFoo.*` are rejected, not false-positively tagged external — but no fixture pinned it: a future "simplification" to a bare `StartsWith(root)` (dropping the `+ "-"` segment terminator) would pass every existing test while silently over-tagging any app-own namespace whose name happens to start with `system`/`microsoft`/etc.
