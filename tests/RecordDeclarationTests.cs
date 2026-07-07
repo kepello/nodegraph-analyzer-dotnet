@@ -144,4 +144,102 @@ public record Person(string Name, int Age);"));
         }
         finally { Directory.Delete(dir, true); }
     }
+
+    // --- Base-type/interface-shape facet (Fathom row
+    // dotnet-record-basetypes-facet-gap 5.0.124.2b.1) ----------------------
+    //
+    // ExtractRelationships' `isClass` gate (Program.cs) tested
+    // `node is ClassDeclarationSyntax` only, so a `record`/`record class`
+    // extending a base record/class fell through to the `implements` branch
+    // — a silent mis-tag, not a missing element (the elements themselves
+    // were already visible per the tests above). Record structs can't have
+    // a base CLASS (only interfaces), so they must stay excluded from the
+    // extends-eligible set.
+
+    private static (string Type, string Subtype, string TargetName)[] EdgesFor(string dir, string fileSuffix, string bareName)
+    {
+        var elements = AnalyzeElements(dir, fileSuffix);
+        var el = elements.FirstOrDefault(e =>
+            e.TryGetProperty("bareName", out var bn) && bn.GetString() == bareName);
+        Assert.True(el.ValueKind != JsonValueKind.Undefined, $"no element emitted for `{bareName}`");
+        return el.GetProperty("edges").EnumerateArray()
+            .Select(edge => (
+                edge.GetProperty("type").GetString()!,
+                edge.TryGetProperty("subtype", out var st) ? st.GetString() ?? "" : "",
+                edge.GetProperty("targetName").GetString()!))
+            .ToArray();
+    }
+
+    [Fact]
+    public void RecordClass_ExtendingBaseRecord_EmitsExtendsNotImplements()
+    {
+        var dir = MakeTempTree(("Animals.cs", @"
+public record Animal(string Name);
+public record Dog(string Name, string Breed) : Animal(Name);"));
+        try
+        {
+            var edges = EdgesFor(dir, "Animals.cs", "Dog");
+            Assert.Contains(edges, e => e.Type == "extends" && e.TargetName == "animal");
+            Assert.DoesNotContain(edges, e => e.Type == "implements" && e.TargetName == "animal");
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void PlainClass_ExtendingSameBase_StillEmitsExtends()
+    {
+        // Control: a plain class extending the same shape must keep working
+        // (the `isClass` gate's original ClassDeclarationSyntax path is
+        // unaffected by adding the record disjunct).
+        var dir = MakeTempTree(("AnimalsPlain.cs", @"
+public record Animal(string Name);
+public class PlainDog : Animal {
+    public PlainDog(string name) : base(name) {}
+}"));
+        try
+        {
+            var edges = EdgesFor(dir, "AnimalsPlain.cs", "PlainDog");
+            Assert.Contains(edges, e => e.Type == "extends" && e.TargetName == "animal");
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void RecordStruct_WithInterface_StillEmitsImplementsNotExtends()
+    {
+        // Record structs can't have a base class — only interfaces. Confirms
+        // the fix's `rd.Kind() != RecordStructDeclaration` guard keeps them
+        // OUT of the extends-eligible set (not wrongly promoted alongside
+        // record/record class).
+        var dir = MakeTempTree(("Circle.cs", @"
+public interface IShape { double Area(); }
+public record struct Circle(double Radius) : IShape {
+    public double Area() => 3.14 * Radius * Radius;
+}"));
+        try
+        {
+            var edges = EdgesFor(dir, "Circle.cs", "Circle");
+            Assert.Contains(edges, e => e.Type == "implements" && e.TargetName == "ishape");
+            Assert.DoesNotContain(edges, e => e.Type == "extends");
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void RecordClass_ImplementingInterface_StillEmitsImplements()
+    {
+        // Pre-existing coincidentally-correct case (per the row's diagnosis):
+        // confirm it still passes after the isClass fix.
+        var dir = MakeTempTree(("Shape.cs", @"
+public interface IShape { double Area(); }
+public record Square(double Side) : IShape {
+    public double Area() => Side * Side;
+}"));
+        try
+        {
+            var edges = EdgesFor(dir, "Shape.cs", "Square");
+            Assert.Contains(edges, e => e.Type == "implements" && e.TargetName == "ishape");
+        }
+        finally { Directory.Delete(dir, true); }
+    }
 }

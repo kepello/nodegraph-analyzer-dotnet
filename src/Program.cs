@@ -2104,7 +2104,15 @@ static object[] ExtractRelationships(
 
     if (node is TypeDeclarationSyntax typeDecl && typeDecl.BaseList != null)
     {
-        var isClass = node is ClassDeclarationSyntax;
+        // `record`/`record class` (but not `record struct` — a record struct
+        // can't have a base CLASS, only interfaces) belongs in the
+        // extends-eligible set alongside plain classes (Fathom row
+        // dotnet-record-basetypes-facet-gap 5.0.124.2b.1). Pre-fix this
+        // tested `ClassDeclarationSyntax` only, so a record/record class
+        // extending a base record/class silently mis-tagged its base-type
+        // edge `implements` instead of `extends`.
+        var isClass = node is ClassDeclarationSyntax
+            || (node is RecordDeclarationSyntax rd && rd.Kind() != SyntaxKind.RecordStructDeclaration);
         var baseTypes = typeDecl.BaseList.Types.ToList();
         for (var i = 0; i < baseTypes.Count; i++)
         {

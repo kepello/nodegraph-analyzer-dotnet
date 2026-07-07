@@ -2,6 +2,19 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.56.0] — 2026-07-07
+
+**`record`/`record class` extending a base record/class silently mis-tagged its base-type edge `implements` instead of `extends`** (Fathom row `dotnet-record-basetypes-facet-gap` 5.0.124.2b.1, follow-on residual from 0.55.0 — filed there, independently re-reproduced here before fixing).
+
+### Fixed
+
+- **`ExtractRelationships`'s `isClass` gate (`Program.cs`) tested `node is ClassDeclarationSyntax` only** — `RecordDeclarationSyntax` never satisfies that check, so a `record`/`record class` with a base-list entry always fell to the `else` branch and emitted `implements` regardless of whether the base was actually a base CLASS. Interface implementations happened to tag correctly by coincidence (that branch doesn't depend on the class/interface distinction). Fix: `isClass = node is ClassDeclarationSyntax || (node is RecordDeclarationSyntax rd && rd.Kind() != SyntaxKind.RecordStructDeclaration)` — record structs are excluded from the extends-eligible set on purpose, since a `record struct` can't have a base class, only interfaces.
+
+### Tests
+
+- New fixtures in `tests/RecordDeclarationTests.cs`: a `record` extending a base `record` (`record Dog(...) : Animal(Name)`) now emits `extends`, not `implements`; a plain `class` extending the same base (control) still emits `extends`; a `record struct` implementing an interface still emits `implements` (confirms record structs aren't wrongly promoted to extends-eligible); a `record` implementing an interface still emits `implements` (confirms the pre-existing coincidentally-correct case is unaffected). RED confirmed first: the record-extends-record case failed against the pre-fix build with the exact mis-tag (`Assert.Contains()` — actual edge `("implements", "explicit", "animal")`, not `extends`); the other three fixtures already passed pre-fix (as diagnosed — their correctness was coincidental, not gated by `isClass`), confirmed still green post-fix.
+- Suite: **263 pass** (was 259; +4).
+
 ## [0.55.0] — 2026-07-06
 
 **C# 9+ `record` / `record struct` declarations were invisible to the graph entirely** (Fathom row `dotnet-record-elements-not-emitted` 5.0.124.2b) — not mislabeled, never emitted at all. A coverage gap on a type-declaration form that's the norm in any modern .NET domain model (DTOs, domain events, CQRS commands/queries).
