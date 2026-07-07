@@ -167,7 +167,7 @@ static class WebSiteProjectLoader
         var companions = WebFormsCompanion.BuildCompanions(
             markupByPath.Values.ToList(),
             globalRegisters,
-            typeExists: fqn => compilation.GetTypeByMetadataName(fqn) != null,
+            resolveType: fqn => ResolveTypeName(compilation, fqn),
             srcInheritsLookup: srcPath =>
                 markupByPath.TryGetValue(srcPath, out var target) ? target.Inherits : null,
             declaredMembersOfClass: BuildDeclaredMemberLookup(trees),
@@ -199,6 +199,77 @@ static class WebSiteProjectLoader
             map[path] = (compilation, tree);
 
         return map;
+    }
+
+    /// <summary>
+    /// Resolve a markup-derived candidate metadata name against the
+    /// compilation, returning the CANONICAL metadata name — never a bare
+    /// bool (Fathom row 5.0.87.t.1). <c>MapControlType</c> builds candidates
+    /// from the MARKUP-CASED tag name (<c>&lt;asp:label&gt;</c> →
+    /// <c>...WebControls.label</c>), which is usually NOT the real metadata
+    /// name; a naive case-insensitive bool would suppress the resulting
+    /// "unresolved" problem while the synthesized field still declared the
+    /// non-existent-cased name — silently non-binding, C# being
+    /// case-sensitive. So:
+    ///   • an EXACT <c>GetTypeByMetadataName</c> hit always wins outright —
+    ///     bit-for-bit identical to every already-resolving control, and the
+    ///     deterministic tie-break when an exact match coexists with a
+    ///     case-variant;
+    ///   • otherwise consult a lazily-built, ONCE-PER-COMPILATION
+    ///     case-insensitive index over the compilation's top-level, arity-0
+    ///     types (markup tags can't name generic/nested types) — a hit
+    ///     returns that type's canonical name;
+    ///   • a case COLLISION found while building the index (two distinct
+    ///     types differing only by case) stores a null sentinel for that
+    ///     key: genuinely ambiguous, never a nondeterministic pick — same as
+    ///     a real miss, both fall through to the existing honest problem
+    ///     paths unchanged.
+    /// Not filtered by accessibility (matches <c>GetTypeByMetadataName</c>'s
+    /// own behavior).
+    /// </summary>
+    public static string? ResolveTypeName(Compilation compilation, string fqn)
+    {
+        if (compilation.GetTypeByMetadataName(fqn) != null) return fqn;
+        var index = CaseInsensitiveIndexCache.GetValue(compilation, BuildCaseInsensitiveIndex);
+        return index.TryGetValue(fqn, out var canonical) ? canonical : null;
+    }
+
+    // Per-compilation cache (not rebuilt per-control) — keyed on the
+    // Compilation instance itself so it never outlives it.
+    static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Compilation, Dictionary<string, string?>>
+        CaseInsensitiveIndexCache = new();
+
+    /// <summary>
+    /// Walk every top-level, arity-0 type in the compilation's global
+    /// namespace ONCE, indexing by case-insensitive dotted name. A collision
+    /// — two distinct types whose dotted names differ ONLY by case — stores
+    /// a null sentinel: ambiguous, never a nondeterministic pick.
+    /// </summary>
+    static Dictionary<string, string?> BuildCaseInsensitiveIndex(Compilation compilation)
+    {
+        var index = new Dictionary<string, string?>(System.StringComparer.OrdinalIgnoreCase);
+        var stack = new Stack<INamespaceSymbol>();
+        stack.Push(compilation.GlobalNamespace);
+        while (stack.Count > 0)
+        {
+            var ns = stack.Pop();
+            foreach (var child in ns.GetNamespaceMembers()) stack.Push(child);
+            foreach (var t in ns.GetTypeMembers())
+            {
+                if (t.Arity != 0) continue; // markup tags can't name generic types
+                var full = ns.IsGlobalNamespace ? t.Name : ns.ToDisplayString() + "." + t.Name;
+                if (index.TryGetValue(full, out var existing))
+                {
+                    if (existing != null && !string.Equals(existing, full, System.StringComparison.Ordinal))
+                        index[full] = null; // case collision — ambiguous, not a pick
+                }
+                else
+                {
+                    index[full] = full;
+                }
+            }
+        }
+        return index;
     }
 
     /// <summary>

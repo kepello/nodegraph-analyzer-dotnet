@@ -261,19 +261,28 @@ static class WebFormsCompanion
     /// <summary>
     /// Map a discovered control to a fully-qualified type name.
     /// Returns (TypeName, Problem):
-    ///   (fqn, null)     — resolved against the compilation's references;
+    ///   (fqn, null)     — resolved against the compilation's references; fqn
+    ///                     is the CANONICAL metadata name <paramref name="resolveType"/>
+    ///                     returned, which may differ in case from the markup-cased
+    ///                     candidate probed (5.0.87.t.1) — a naive exists-only
+    ///                     probe would leave the synthesized field declaring a
+    ///                     non-existent-cased type, a silent-degradation trap.
     ///   (fqn, problem)  — type NAME known from the registration but absent
-    ///                     from references → synthesize anyway (field declares,
-    ///                     member edges drop honestly — Variant B) + loud problem;
+    ///                     from references → synthesize anyway with the
+    ///                     markup-cased candidate (field declares, member
+    ///                     edges drop honestly — Variant B) + loud problem;
     ///   (null, problem) — no type name derivable (unregistered prefix /
     ///                     missing Src target) → skip the field + loud problem.
+    /// <paramref name="resolveType"/> returns the canonical metadata name on a
+    /// hit or null on a miss — never a bare bool (see
+    /// <c>WebSiteProjectLoader.ResolveTypeName</c>, its shipped implementation).
     /// <paramref name="srcInheritsLookup"/> receives the Register's Src value
     /// verbatim; BuildCompanions wraps it with path resolution.
     /// </summary>
     public static (string? TypeName, string? Problem) MapControlType(
         WebFormsControl control,
         IReadOnlyList<WebFormsRegister> registers,
-        Func<string, bool> typeExists,
+        Func<string, string?> resolveType,
         Func<string, string?> srcInheritsLookup)
     {
         // Html server control → HtmlControls table.
@@ -287,18 +296,25 @@ static class WebFormsCompanion
                 typeName = HtmlTagTypes.TryGetValue(control.TagName, out var ht)
                     ? ht : "HtmlGenericControl";
             var fqn = "System.Web.UI.HtmlControls." + typeName;
-            return typeExists(fqn)
-                ? (fqn, null)
+            var resolved = resolveType(fqn);
+            return resolved != null
+                ? (resolved, null)
                 : (fqn, $"html server control type \"{fqn}\" not found in references");
         }
 
-        // asp: → probe the System.Web candidate namespaces in order.
+        // asp: → probe the System.Web candidate namespaces in order. The
+        // candidate is built from the MARKUP-CASED tag name (`<asp:label>` →
+        // `...WebControls.label`), which usually will NOT be the real
+        // metadata name — resolveType must hand back the CANONICAL name
+        // (5.0.87.t.1), not just confirm something exists, or the
+        // synthesized field would declare a non-existent-cased type.
         if (control.TagPrefix.Equals("asp", StringComparison.OrdinalIgnoreCase))
         {
             foreach (var ns in AspCandidateNamespaces)
             {
                 var candidate = ns + "." + control.TagName;
-                if (typeExists(candidate)) return (candidate, null);
+                var resolved = resolveType(candidate);
+                if (resolved != null) return (resolved, null);
             }
             var fallback = AspCandidateNamespaces[0] + "." + control.TagName;
             return (fallback, $"asp:{control.TagName} resolved in none of the System.Web namespaces");
@@ -325,8 +341,9 @@ static class WebFormsCompanion
         if (nsRegister != null)
         {
             var fqn = nsRegister.Namespace + "." + control.TagName;
-            return typeExists(fqn)
-                ? (fqn, null)
+            var resolved = resolveType(fqn);
+            return resolved != null
+                ? (resolved, null)
                 : (fqn, $"registered type \"{fqn}\" (assembly \"{nsRegister.Assembly ?? "(none)"}\") "
                     + "not found in references");
         }
@@ -345,7 +362,7 @@ static class WebFormsCompanion
     public static List<(string Path, string Source)> BuildCompanions(
         IReadOnlyList<WebFormsMarkupFile> markupFiles,
         IReadOnlyList<WebFormsRegister> globalRegisters,
-        Func<string, bool> typeExists,
+        Func<string, string?> resolveType,
         Func<string, string?> srcInheritsLookup,
         Func<string, IReadOnlyCollection<string>> declaredMembersOfClass,
         string wspRoot,
@@ -372,7 +389,7 @@ static class WebFormsCompanion
                 foreach (var control in markup.Controls)
                 {
                     if (!seenIds.Add(control.Id)) continue; // declared in codebehind or an earlier markup file
-                    var (typeName, problem) = MapControlType(control, registers, typeExists, LookupSrc);
+                    var (typeName, problem) = MapControlType(control, registers, resolveType, LookupSrc);
                     if (problem != null)
                         problems.Add($"{markup.Path}: control \"{control.Id}\" — {problem}");
                     if (typeName == null) continue; // honest drop, problem above

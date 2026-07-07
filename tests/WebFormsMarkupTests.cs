@@ -159,12 +159,13 @@ public class WebFormsCompanionTests
     public void Asp_prefix_probes_webcontrols_then_system_web_ui()
     {
         var exists = new HashSet<string> { "System.Web.UI.WebControls.Label", "System.Web.UI.ScriptManager" };
+        Func<string, string?> resolveType = fqn => exists.Contains(fqn) ? fqn : null;
         var (label, p1) = WebFormsCompanion.MapControlType(
-            Ctl("asp", "Label", "lbl"), [], exists.Contains, _ => null);
+            Ctl("asp", "Label", "lbl"), [], resolveType, _ => null);
         Assert.Equal("System.Web.UI.WebControls.Label", label);
         Assert.Null(p1);
         var (sm, p2) = WebFormsCompanion.MapControlType(
-            Ctl("asp", "ScriptManager", "sm1"), [], exists.Contains, _ => null);
+            Ctl("asp", "ScriptManager", "sm1"), [], resolveType, _ => null);
         Assert.Equal("System.Web.UI.ScriptManager", sm);
         Assert.Null(p2);
     }
@@ -178,12 +179,12 @@ public class WebFormsCompanionTests
         var registers = new[] { new WebFormsRegister("telerik", "Telerik.Web.UI", "Telerik.Web.UI", null, null) };
         var (resolved, pOk) = WebFormsCompanion.MapControlType(
             Ctl("telerik", "RadComboBox", "cb"), registers,
-            fqn => fqn == "Telerik.Web.UI.RadComboBox", _ => null);
+            fqn => fqn == "Telerik.Web.UI.RadComboBox" ? fqn : null, _ => null);
         Assert.Equal("Telerik.Web.UI.RadComboBox", resolved);
         Assert.Null(pOk);
 
         var (unresolved, pMissing) = WebFormsCompanion.MapControlType(
-            Ctl("telerik", "RadComboBox", "cb"), registers, _ => false, _ => null);
+            Ctl("telerik", "RadComboBox", "cb"), registers, _ => null, _ => null);
         Assert.Equal("Telerik.Web.UI.RadComboBox", unresolved);
         Assert.NotNull(pMissing);
     }
@@ -192,7 +193,7 @@ public class WebFormsCompanionTests
     public void Unregistered_prefix_yields_no_type_and_a_problem()
     {
         var (t, problem) = WebFormsCompanion.MapControlType(
-            Ctl("mystery", "Widget", "w1"), [], _ => false, _ => null);
+            Ctl("mystery", "Widget", "w1"), [], _ => null, _ => null);
         Assert.Null(t);
         Assert.NotNull(problem);
     }
@@ -202,7 +203,7 @@ public class WebFormsCompanionTests
     {
         var registers = new[] { new WebFormsRegister("rc", null, null, "~/Controls/ReportTitle.ascx", "ReportTitle") };
         var (t, p) = WebFormsCompanion.MapControlType(
-            Ctl("rc", "ReportTitle", "ReportTitle"), registers, _ => false,
+            Ctl("rc", "ReportTitle", "ReportTitle"), registers, _ => null,
             src => src == "~/Controls/ReportTitle.ascx" ? "Portal_Reports_ReportControls_ReportTile" : null);
         Assert.Equal("Portal_Reports_ReportControls_ReportTile", t);
         Assert.Null(p);
@@ -213,7 +214,7 @@ public class WebFormsCompanionTests
     {
         var registers = new[] { new WebFormsRegister("rc", null, null, "~/Gone.ascx", "Gone") };
         var (t, p) = WebFormsCompanion.MapControlType(
-            Ctl("rc", "Gone", "gone1"), registers, _ => false, _ => null);
+            Ctl("rc", "Gone", "gone1"), registers, _ => null, _ => null);
         Assert.Null(t);
         Assert.NotNull(p);
     }
@@ -221,21 +222,21 @@ public class WebFormsCompanionTests
     [Fact]
     public void Html_controls_map_to_htmlcontrols_types()
     {
-        Func<string, bool> exists = fqn => fqn.StartsWith("System.Web.UI.HtmlControls.");
+        Func<string, string?> resolveType = fqn => fqn.StartsWith("System.Web.UI.HtmlControls.") ? fqn : null;
         Assert.Equal("System.Web.UI.HtmlControls.HtmlGenericControl",
-            WebFormsCompanion.MapControlType(Ctl(null, "div", "divError"), [], exists, _ => null).TypeName);
+            WebFormsCompanion.MapControlType(Ctl(null, "div", "divError"), [], resolveType, _ => null).TypeName);
         Assert.Equal("System.Web.UI.HtmlControls.HtmlInputCheckBox",
-            WebFormsCompanion.MapControlType(Ctl(null, "input", "chk1", "checkbox"), [], exists, _ => null).TypeName);
+            WebFormsCompanion.MapControlType(Ctl(null, "input", "chk1", "checkbox"), [], resolveType, _ => null).TypeName);
         Assert.Equal("System.Web.UI.HtmlControls.HtmlInputText",
-            WebFormsCompanion.MapControlType(Ctl(null, "input", "txt1"), [], exists, _ => null).TypeName);
+            WebFormsCompanion.MapControlType(Ctl(null, "input", "txt1"), [], resolveType, _ => null).TypeName);
         Assert.Equal("System.Web.UI.HtmlControls.HtmlSelect",
-            WebFormsCompanion.MapControlType(Ctl(null, "select", "sel1"), [], exists, _ => null).TypeName);
+            WebFormsCompanion.MapControlType(Ctl(null, "select", "sel1"), [], resolveType, _ => null).TypeName);
         Assert.Equal("System.Web.UI.HtmlControls.HtmlImage",
-            WebFormsCompanion.MapControlType(Ctl(null, "img", "img1"), [], exists, _ => null).TypeName);
+            WebFormsCompanion.MapControlType(Ctl(null, "img", "img1"), [], resolveType, _ => null).TypeName);
         Assert.Equal("System.Web.UI.HtmlControls.HtmlAnchor",
-            WebFormsCompanion.MapControlType(Ctl(null, "a", "lnk1"), [], exists, _ => null).TypeName);
+            WebFormsCompanion.MapControlType(Ctl(null, "a", "lnk1"), [], resolveType, _ => null).TypeName);
         Assert.Equal("System.Web.UI.HtmlControls.HtmlForm",
-            WebFormsCompanion.MapControlType(Ctl(null, "form", "form1"), [], exists, _ => null).TypeName);
+            WebFormsCompanion.MapControlType(Ctl(null, "form", "form1"), [], resolveType, _ => null).TypeName);
     }
 
     [Fact]
@@ -272,7 +273,7 @@ public class WebFormsCompanionTests
             "/site/B.ascx");
         var problems = new List<string>();
         var companions = WebFormsCompanion.BuildCompanions(
-            [a, b], [], fqn => fqn.StartsWith("System.Web.UI.WebControls."), _ => null,
+            [a, b], [], fqn => fqn.StartsWith("System.Web.UI.WebControls.") ? fqn : null, _ => null,
             _ => Array.Empty<string>(), "/site", problems);
         var companion = Assert.Single(companions);
         Assert.EndsWith(WebFormsCompanion.PathSuffix, companion.Path);
@@ -289,7 +290,7 @@ public class WebFormsCompanionTests
             + "<asp:Label runat=\"server\" ID=\"lblDeclared\" />\n<asp:Label runat=\"server\" ID=\"lblNew\" />",
             "/site/A.ascx");
         var companions = WebFormsCompanion.BuildCompanions(
-            [a], [], _ => true, _ => null,
+            [a], [], fqn => fqn, _ => null,
             cls => cls == "X" ? new[] { "lblDeclared" } : Array.Empty<string>(),
             "/site", new List<string>());
         var companion = Assert.Single(companions);
@@ -308,7 +309,7 @@ public class WebFormsCompanionTests
             + "<rc:T1 runat=\"server\" ID=\"t1\" />\n<rc:T2 runat=\"server\" ID=\"t2\" />",
             Path.Combine("/site", "Sub", "A.ascx"));
         WebFormsCompanion.BuildCompanions(
-            [a], [], _ => false,
+            [a], [], _ => null,
             p => { seen.Add(p); return "SomeClass"; },
             _ => Array.Empty<string>(), "/site", new List<string>());
         Assert.Equal(Path.GetFullPath(Path.Combine("/site", "Controls", "T1.ascx")), seen[0]);
@@ -323,7 +324,7 @@ public class WebFormsCompanionTests
         var noControls = WebFormsMarkupParser.Parse(
             "<%@ Control CodeFile=\"Y.ascx.cs\" Inherits=\"Y\" %>\n<div>static</div>", "/site/B.ascx");
         var companions = WebFormsCompanion.BuildCompanions(
-            [noCodeFile, noControls], [], _ => true, _ => null,
+            [noCodeFile, noControls], [], fqn => fqn, _ => null,
             _ => Array.Empty<string>(), "/site", new List<string>());
         Assert.Empty(companions);
     }
