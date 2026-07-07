@@ -274,6 +274,87 @@ public class CameraPropertyValue {
     }
 
     [Fact]
+    public void AmbiguousOverload_SameArityCall_EmitsAmbiguousOverloadLimitation()
+    {
+        // Fathom row dotnet-renamed-limitation-kind-pins (5.0.98.2), site 1 —
+        // Program.cs's `intraResult.AmbiguousCalls` emission (~line 882). The
+        // limitation-kind rename at 5.0.98.1 (`csharp-ambiguous-overload` →
+        // `ambiguous-overload`) shipped with no dedicated pin for the new kind
+        // string; this pins it. `Foo(int)` / `Foo(string)` share arity 1, so a
+        // same-class `Foo(1)` call can't be resolved to a specific overload by
+        // argument count alone (Trade-off 2.2.17) — a `callsMethod` edge is
+        // omitted in favor of this structured limitation.
+        var dir = MakeTempTree(("Ov.cs", @"
+public class Ov {
+    public void Foo(int a) { }
+    public void Foo(string a) { }
+    public void Run() { Foo(1); }
+}"));
+        try
+        {
+            var (_, limitations) = AnalyzeFile(dir, "Ov.cs");
+            Assert.Contains("ambiguous-overload", limitations);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void UnresolvedCall_DelegateFieldInvocation_EmitsUnresolvedCallLimitation()
+    {
+        // Fathom row dotnet-renamed-limitation-kind-pins (5.0.98.2), site 2 —
+        // Program.cs's in-file resolution-failure branch (~line 2214, the
+        // `else if (allNames.Contains(calledName))` arm following a failed
+        // ResolveCallTarget + ResolveExternalCallName). Pins the renamed
+        // `unresolved-call` kind string (was `csharp-unresolved-call`,
+        // 5.0.98.1) for this specific branch, distinct from site 3's `+=`
+        // branch below. `DoStuff()` invokes an in-file `Action` FIELD
+        // (implicit delegate invoke, not a method declaration) — semantic
+        // resolution to a method symbol fails, but `DoStuff` IS a known
+        // in-file name, so a `calls` edge is omitted in favor of this
+        // limitation rather than an unbindable bare-name target.
+        var dir = MakeTempTree(("Foo.cs", @"
+using System;
+public class Foo {
+    private Action DoStuff;
+    public void Run() { DoStuff(); }
+}"));
+        try
+        {
+            var (_, limitations) = AnalyzeFile(dir, "Foo.cs");
+            Assert.Contains("unresolved-call", limitations);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void UnresolvedCall_EventHandlerPlusEqualsSubscription_EmitsUnresolvedCallLimitation()
+    {
+        // Fathom row dotnet-renamed-limitation-kind-pins (5.0.98.2), site 3 —
+        // Program.cs's event-handler `+=` branch (~line 2395, the `else` arm
+        // of a failed `ResolveCallTarget(assign.Right)` on an
+        // AddAssignmentExpression). Pins the renamed `unresolved-call` kind
+        // string for THIS branch specifically — distinct code path from site
+        // 2 above even though both emit the same kind string. `HandlerField`
+        // is an in-file `EventHandler` FIELD (not a method declaration)
+        // subscribed via `Tick += HandlerField`; the handler can't resolve to
+        // a method, so a `delegates` edge is omitted in favor of this
+        // limitation.
+        var dir = MakeTempTree(("Wiring.cs", @"
+using System;
+public class Wiring {
+    public event EventHandler Tick;
+    private EventHandler HandlerField;
+    public void Hook() { this.Tick += HandlerField; }
+}"));
+        try
+        {
+            var (_, limitations) = AnalyzeFile(dir, "Wiring.cs");
+            Assert.Contains("unresolved-call", limitations);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
     public void EntryPoint_EventHandlerSignature_IsEventHandler()
     {
         // A method matching the .NET event-callback convention
