@@ -2,6 +2,22 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.59.0] — 2026-07-08
+
+**`MakeNaturalKey` was the seventh, divergent copy of the natural-key codec that the `naturalkey-codec-consolidation` arc's mirror wave missed** (Fathom row `5.0.128`, WP-8, finding F1 — a LIVE bug). Every other emitter across the workspace (`nodegraph-analysis`, `nodegraph-work-tracking`, `fathom-mcp`, `nodegraph-analyzer-typescript`, `nodegraph-inspect-cli`, `nodegraph-analyzer-conformance`) picked up the escape-then-substitute codec at row `5.0.120.r3`; this analyzer's C# mirror was never updated and kept the old bare `'/' -> ':'` substitution, with no `\` doubling and no `:`/`#` escaping. Any C# `artifactId`/element name containing a literal `:`, `\`, or `#` emitted a `naturalKey`/`targetRef` that silently dangled on the ingest side, and a name containing a literal `:` could collide with a different element's `/`-substituted key and mis-bind. Empirically confirmed by `nodegraph-analyzer-conformance`'s staged e2e fixture (`Weird#Name.cs`, WP-4, 0.15.0) against this repo's 0.58.0.
+
+This is the ONLY work package in the arc where PERSISTED KEY BYTES CHANGE: emitted `naturalKey`/`crossFileRef`/`targetRef` values for any C# artifact or element name containing `:`, `\`, or `#` are now escaped and differ byte-for-byte from 0.58.0's output. Pre-prod — delete `.fathom/graph.db` and re-analyze; there is no migration path.
+
+### Fixed
+
+- **`MakeNaturalKey`** (`src/Program.cs`, all 4 call sites unchanged, routed through the fix) — extracted into a new `NaturalKeyCodec` static class (`src/Program.NaturalKey.cs`) mirroring `escapeNaturalKeyComponent`/`elementNaturalKey` in `nodegraph-core/src/natural-key.ts` byte-for-byte: doubles pre-existing `\`, escapes pre-existing `:` and `#` with the now-unambiguous `\` marker, THEN substitutes `/` → `:` — order is load-bearing (see the spec's doc comment for the injectivity argument). Empty-name composition (artifact-only key, no trailing `#`) is unchanged and matches `elementNaturalKey`'s semantics exactly.
+
+### Tests
+
+- New `tests/NaturalKeyCodecTests.cs` — loads the shared vector file `nodegraph-analyzer-conformance/fixtures/natural-key-codec/vectors.json` (workspace-relative path, precedent `CrossLangFixturesTests.cs:25`; skips gracefully with a loud test-output notice for a standalone checkout with no `nodegraph-analyzer-conformance` sibling) and asserts `NaturalKeyCodec.EscapeNaturalKeyComponent`/`MakeNaturalKey` reproduce every `componentVectors` and `elementKeyVectors` entry byte-exactly, and every `injectivityPairs` entry actually differs. RED confirmed first: with the pre-fix bare-substitution restored, 2 of the 4 new tests failed for the right reason (23 component-vector mismatches, 4 element-key-vector mismatches — every vector containing `:`/`\`/`#`); restored, green.
+- No pre-existing test pinned the old bare-substitution output — full suite stayed green with zero updates needed to prior fixtures.
+- Suite: **277 pass** (was 273; +4).
+
 ## [0.58.0] — 2026-07-07
 
 **Regression pins for the renamed `ambiguous-overload`/`unresolved-call` limitation-kind strings** (Fathom row `dotnet-renamed-limitation-kind-pins` 5.0.98.2). The rename shipped at 0.46.0 (5.0.98.1, 2026-06-11) with no dedicated spawn-based test pins for either new kind string — coverage came only from incidental runtime behavior. A 2026-07-06 backlog-audit re-confirmed the gap and found the emission sites had drifted (7 intervening commits) to 3 total sites, not 2 as originally scoped: `ambiguous-overload` (`Program.cs` ~line 882), and `unresolved-call` from two DISTINCT branches — the in-file resolution-failure branch (~line 2214) and the event-handler `+=` subscription branch (~line 2395).

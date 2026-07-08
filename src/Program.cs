@@ -851,7 +851,7 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
                                 });
                             continue;
                         }
-                        crossFileRef = MakeNaturalKey(canonicalizeFilePath(memberFile), qualifiedTarget);
+                        crossFileRef = NaturalKeyCodec.MakeNaturalKey(canonicalizeFilePath(memberFile), qualifiedTarget);
                     }
                     if (crossFileRef is null)
                     {
@@ -934,7 +934,7 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
             ["edges"] = DedupeEdges(relationships).ToArray(),
             ["metadata"] = metadata,
             // Language-conformance A2 — stable URI-safe natural key.
-            ["naturalKey"] = MakeNaturalKey(filePath, name),
+            ["naturalKey"] = NaturalKeyCodec.MakeNaturalKey(filePath, name),
             // A6 — bare identifier (case preserved from source).
             ["bareName"] = BareNameFrom(qualifiedRaw),
             // A5 — language identifier; A7 — source location facet.
@@ -1769,7 +1769,7 @@ static object[] ExtractRelationships(
         seen.Add($"{type}:{canonical}");
         if (targetFile != null)
         {
-            var targetRef = MakeNaturalKey(targetFile, canonical);
+            var targetRef = NaturalKeyCodec.MakeNaturalKey(targetFile, canonical);
             relationships.Add(new { type, subtype, targetName = canonical, targetRef });
         }
         else
@@ -2352,7 +2352,7 @@ static object[] ExtractRelationships(
 
                 if (parentTargetFile != null)
                 {
-                    var targetRef = MakeNaturalKey(parentTargetFile, canonical);
+                    var targetRef = NaturalKeyCodec.MakeNaturalKey(parentTargetFile, canonical);
                     relationships.Add(new { type = "overrides", targetName = canonical, targetRef });
                 }
                 else
@@ -2830,20 +2830,6 @@ static string? UniformAccessFromModifiers(SyntaxTokenList modifiers)
         }
     }
     return access;
-}
-
-/// <summary>
-/// Synthesize a URI-safe natural key per the language-conformance A2/A4
-/// convention. `/` in either component substitutes to `:` so the result
-/// is safe for the substrate's cross-graph URI scheme.
-/// </summary>
-static string MakeNaturalKey(string artifactId, string name)
-{
-    var safeArtifact = artifactId.Replace('/', ':');
-    var safeName = name.Replace('/', ':');
-    return string.IsNullOrEmpty(safeName)
-        ? safeArtifact
-        : $"{safeArtifact}#{safeName}";
 }
 
 /// <summary>
