@@ -2377,6 +2377,51 @@ static object[] ExtractRelationships(
                 _ => null
             };
             if (handlerName == null || !allNames.Contains(handlerName)) continue;
+
+            // Discriminate a real event/delegate subscription from ordinary
+            // numeric (or other non-delegate) `+=` compound assignment before
+            // treating this as a subscription attempt (Fathom row
+            // dotnet-compound-assignment-event-sweep-false-positive 4.7.2.t2).
+            // `counter += SomeIntProperty` is arithmetic accumulation whose
+            // RHS identifier merely collides with an in-file name — it is not
+            // a subscription just because the name matches. Resolve the LHS
+            // via the semantic model: eligible LHS shapes are an actual
+            // IEventSymbol, or any member/local/parameter whose TYPE is a
+            // delegate (TypeKind.Delegate covers named delegate types,
+            // Action/Func, and custom delegates alike). A LHS that resolves
+            // to a provably non-delegate type (int, string, ...) is skipped
+            // outright — no edge, no limitation, it's just arithmetic.
+            var lhsSymbolInfo = semanticModel.GetSymbolInfo(assign.Left);
+            var lhsSymbol = lhsSymbolInfo.Symbol ?? lhsSymbolInfo.CandidateSymbols.FirstOrDefault();
+            var lhsType = lhsSymbol switch
+            {
+                IEventSymbol ev => ev.Type,
+                IPropertySymbol prop => prop.Type,
+                IFieldSymbol field => field.Type,
+                ILocalSymbol local => local.Type,
+                IParameterSymbol param => param.Type,
+                _ => null
+            };
+            var isEventOrDelegateTyped = lhsSymbol is IEventSymbol
+                || lhsType?.TypeKind == TypeKind.Delegate;
+            if (lhsSymbol != null && !isEventOrDelegateTyped) continue;
+            if (lhsSymbol == null)
+            {
+                // Semantic resolution of the LHS failed — a degraded
+                // compilation (references-free file: orphan / WSP / failed
+                // csproj restore) rather than a resolvable value type.
+                // Conservative fallback, mirroring the established
+                // semantic-vs-syntactic degradation pattern from the
+                // 5.0.68.1/5.0.72 era: only keep treating this as a
+                // subscription attempt when the RHS itself resolves to an
+                // in-file METHOD declaration (strong evidence of a real
+                // handler wire-up); an RHS resolving to a non-method in-file
+                // member (property/field/local) is arithmetic — skip.
+                var rhsSymbolInfo = semanticModel.GetSymbolInfo(assign.Right);
+                var rhsSymbol = rhsSymbolInfo.Symbol ?? rhsSymbolInfo.CandidateSymbols.FirstOrDefault();
+                if (rhsSymbol != null && rhsSymbol is not IMethodSymbol) continue;
+            }
+
             // `event += handler` — resolve the handler method to its signatured
             // element key so the delegate edge binds (was a bare name that
             // could not bind — Fathom row 5.0.68.1). Unresolvable handlers

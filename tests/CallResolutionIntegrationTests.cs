@@ -355,6 +355,95 @@ public class Wiring {
     }
 
     [Fact]
+    public void UnresolvedCall_PropertyAccumulationCompoundAssignment_NoLimitation()
+    {
+        // Fathom row dotnet-compound-assignment-event-sweep-false-positive
+        // (4.7.2.t2). Mirrors the false positive this repo's own self-analysis
+        // surfaced at Program.Cognitive.cs:194 — `state.NestingDepthSum +=
+        // state.Depth;` is ordinary numeric accumulation between two `int`
+        // members; `Depth` merely collides with an in-file member name. The
+        // `+=` sweep used to treat ANY compound assignment whose RHS name
+        // matched an in-file name as an event subscription attempt, emitting
+        // a spurious `unresolved-call` limitation once `ResolveCallTarget`
+        // (correctly) failed to resolve a property to a method. The LHS
+        // (`state.NestingDepthSum`) resolves via the semantic model to a
+        // non-event, non-delegate `int` property — arithmetic, not a
+        // subscription — so no edge and no limitation should be emitted.
+        var dir = MakeTempTree(("Acc.cs", @"
+public class State {
+    public int Depth;
+    public int NestingDepthSum;
+}
+public class Walker {
+    public void Visit(State state) {
+        state.NestingDepthSum += state.Depth;
+    }
+}"));
+        try
+        {
+            var (_, limitations) = AnalyzeFile(dir, "Acc.cs");
+            Assert.DoesNotContain("unresolved-call", limitations);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void UnresolvedCall_LocalCounterAccumulationCompoundAssignment_NoLimitation()
+    {
+        // Fathom row dotnet-compound-assignment-event-sweep-false-positive
+        // (4.7.2.t2). Mirrors the second confirmed false-positive shape from
+        // self-analysis, Program.Scalars.cs:73-74 — `sonarBranchCount +=
+        // cog.SonarBranchCount;` — a local `int` counter accumulated from a
+        // member access RHS whose name happens to match an in-file property.
+        // The LHS is a local variable of type `int` (not an event/delegate),
+        // so the sweep must skip it entirely: no edge, no limitation.
+        var dir = MakeTempTree(("Counter.cs", @"
+public class Cog {
+    public int SonarBranchCount;
+}
+public class Extractor {
+    public int Extract(Cog cog) {
+        var sonarBranchCount = 0;
+        sonarBranchCount += cog.SonarBranchCount;
+        return sonarBranchCount;
+    }
+}"));
+        try
+        {
+            var (_, limitations) = AnalyzeFile(dir, "Counter.cs");
+            Assert.DoesNotContain("unresolved-call", limitations);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void DelegatesEdge_DelegateFieldMethodGroupSubscription_EmitsDelegatesEdge()
+    {
+        // Fathom row dotnet-compound-assignment-event-sweep-false-positive
+        // (4.7.2.t2). A delegate-TYPED field (not an `event`-keyword member)
+        // subscribed via `+=` to an in-file method is a real subscription —
+        // the discrimination rule must not over-correct and start skipping
+        // legitimate delegate-field wiring. LHS resolves to a field whose
+        // type IS a delegate (`Action`), so the sweep proceeds and
+        // `ResolveCallTarget` resolves the RHS method group to a `delegates`
+        // edge — no limitation.
+        var dir = MakeTempTree(("Del.cs", @"
+using System;
+public class Del {
+    private Action MyHandler;
+    public void Wire() { MyHandler += SomeMethod; }
+    private void SomeMethod() { }
+}"));
+        try
+        {
+            var (edges, limitations) = AnalyzeFile(dir, "Del.cs");
+            Assert.DoesNotContain("unresolved-call", limitations);
+            Assert.Contains(edges, e => e.Type == "calls" && e.Subtype == "delegates");
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
     public void EntryPoint_EventHandlerSignature_IsEventHandler()
     {
         // A method matching the .NET event-callback convention
