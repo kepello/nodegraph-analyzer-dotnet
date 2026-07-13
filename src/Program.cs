@@ -2251,7 +2251,8 @@ static object[] ExtractRelationships(
         }
     }
 
-    if (node is TypeDeclarationSyntax overrideContainer)
+    if (node is MethodDeclarationSyntax overrideMember
+        && semanticModel.GetDeclaredSymbol(overrideMember) is IMethodSymbol memberSymbol)
     {
         // Fathom row `l2-overrides-edge-first-class` (3.1.2.1 P4a): emit
         // `overrides` edges for class methods that override a parent's
@@ -2260,12 +2261,22 @@ static object[] ExtractRelationships(
         // Direction: source = OVERRIDING method (this class's member);
         // target = OVERRIDDEN method (parent class or interface member).
         // Same convention as TS analyzer (nodegraph-analyzer-typescript@0.36.0).
+        //
+        // Fathom row `overrides-edge-source-kind-diverges` (3.1.1.6, crit 4): the
+        // contract three lines above was DOCUMENTED AND THEN VIOLATED. This block
+        // used to be gated on `node is TypeDeclarationSyntax` and loop over the
+        // type's members — but `ExtractRelationships` is called ONCE PER ELEMENT
+        // NODE and everything it returns is sourced AT THAT NODE. So every
+        // `overrides` edge came out sourced at the CLASS: TS emitted
+        // method → method, .NET emitted class → method.
+        //
+        // Blast radius: scenario entries are METHODS, so a class-sourced edge can
+        // never match one. Every `overrides`-keyed feature was a SILENT NO-OP on
+        // .NET while passing every TS test — measured on EnvisionWeb: 132 edges
+        // emitted, ZERO usable polymorphic families. Gating on the MEMBER node
+        // makes the source the overriding method, as the contract always said.
         var seenOverrides = new HashSet<string>();
-        foreach (var member in overrideContainer.Members.OfType<MethodDeclarationSyntax>())
         {
-            var memberSymbol = semanticModel.GetDeclaredSymbol(member) as IMethodSymbol;
-            if (memberSymbol == null) continue;
-
             // Collect the set of parent methods this member overrides.
             var parents = new List<IMethodSymbol>();
 

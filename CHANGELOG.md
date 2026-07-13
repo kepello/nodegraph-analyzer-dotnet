@@ -2,6 +2,47 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.61.0] — 2026-07-13
+
+**BREAKING (edge shape) — `overrides` edges are now sourced at the overriding METHOD, not the CLASS** (Fathom row `overrides-edge-source-kind-diverges` 3.1.1.6, crit 4).
+
+### The bug
+
+The emission block carried this comment, directly above the code:
+
+> *"Direction: source = OVERRIDING method (this class's member); target = OVERRIDDEN method (parent class or interface member). Same convention as TS analyzer."*
+
+**The contract was documented and then violated.** `ExtractRelationships` is called **once per element node**, and everything it returns is sourced **at that node** — but the block was gated on `node is TypeDeclarationSyntax` and looped over the type's members. So every `overrides` edge came out sourced at the **CLASS**:
+
+| analyzer | `overrides` source |
+| --- | --- |
+| TypeScript | `method` ✅ |
+| **.NET** | **`class`** ❌ |
+| Swift | *not emitted at all* |
+
+### Why it survived
+
+The .NET tests asserted only on the edge's **target** key (they were written for the 5.0.112 `targetRef` param-qualification bug). **The source was never pinned** — and one test had actually written the bug down as intended behaviour (*"the `overrides` edge is attached to the CLASS element"*), locking it in. **The bug had a test defending it.**
+
+### Blast radius
+
+**Scenario entries are METHODS.** A class-sourced edge can never match one, so **every `overrides`-keyed feature was a silent no-op on .NET while passing every TypeScript test** — including L7a's alternate-flow grouping and its interface-rooted merge bound. Measured on a 91k-element .NET corpus: **132 `overrides` edges emitted, ZERO usable polymorphic families.** This is what made the whole shape divergence visible; it was found three misdiagnoses deep.
+
+### Fixed
+
+- `src/Program.cs` — the block is now gated on `node is MethodDeclarationSyntax`, so the edge is sourced at the overriding member. Both polymorphism paths are preserved: the explicit `override` keyword (class extension / abstract override) **and** implicit/explicit interface implementation.
+
+### Tests
+
+- **`tests/OverridesEdgeTests.cs`** — new `OverridesEdge_IsSourcedAtTheOVERRIDING_METHOD_notTheClass`, RED-witnessed before the fix (`ElementName = loginmodal` — the class). It pins the SOURCE, which nothing did before.
+- The two pre-existing assertions that pinned the CLASS-sourced shape are corrected to the method-sourced one, with the history recorded in-place so the mistake is not repeated.
+- **281/281 pass.**
+
+### Cross-analyzer guard
+
+`@kepello/nodegraph-analyzer-conformance@0.19.0` adds an **edge-shape contract ratchet** that runs BOTH analyzers over a shared polymorphism fixture and fails if they disagree on any edge type's source kind. **Pre-fix it flags exactly this**: `overrides  typescript=[method]  csharp=[class]`.
+
+
 ## [0.60.0] — 2026-07-08
 
 **The event-handler `+=` sweep treated ANY compound assignment whose RHS name collided with an in-file identifier as an event subscription attempt, manufacturing spurious `unresolved-call` limitations on ordinary numeric accumulation** (Fathom row `dotnet-compound-assignment-event-sweep-false-positive` 4.7.2.t2, found by a limitations-triage pass, confirmed live on this repo's own self-analysis: `Program.Cognitive.cs:194`'s `state.NestingDepthSum += state.Depth` and `Program.Scalars.cs:73-74`'s `sonarBranchCount += cog.SonarBranchCount` / `+= cog.SonarNestingDepthSum` — three of the meta-repo's 19 unresolved-call records on this repo's own `src/`, roughly a third of the corpus-wide count).

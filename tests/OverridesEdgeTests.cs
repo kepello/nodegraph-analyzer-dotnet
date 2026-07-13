@@ -113,6 +113,52 @@ public class OverridesEdgeTests
     }
 
     [Fact]
+    public void OverridesEdge_IsSourcedAtTheOVERRIDING_METHOD_notTheClass()
+    {
+        // Fathom row `overrides-edge-source-kind-diverges` (3.1.1.6, crit 4).
+        //
+        // The contract is stated in Program.cs directly above the emission block:
+        //     "Direction: source = OVERRIDING method (this class's member);
+        //                target = OVERRIDDEN method (parent class or interface member).
+        //      Same convention as TS analyzer."
+        //
+        // It was documented and then violated. ExtractRelationships is called ONCE PER
+        // ELEMENT NODE and its return value is sourced AT THAT NODE; the block was gated on
+        // `node is TypeDeclarationSyntax`, so every `overrides` edge came out sourced at the
+        // CLASS. TS emits method->method; .NET emitted class->method.
+        //
+        // Blast radius: scenario entries are METHODS. A class-sourced edge can never match
+        // one, so every `overrides`-keyed feature (L7a alternate-flow grouping, the
+        // interface-rooted merge bound) was a SILENT NO-OP on .NET while passing every TS
+        // test. Proven on EnvisionWeb: 132 overrides edges, ZERO usable polymorphic families.
+        //
+        // This test pins the SOURCE. Nothing did before — the pre-existing tests assert only
+        // on the TARGET key, which is why the divergence survived.
+        var dir = MakeTempTree(
+            ("Base.cs", @"
+using System;
+public abstract class AuthenticatedModalBase {
+    public virtual void OnInit(EventArgs e) { }
+}"),
+            ("Derived.cs", @"
+using System;
+public class LoginModal : AuthenticatedModalBase {
+    public override void OnInit(EventArgs e) { }
+}"));
+        try
+        {
+            var (_, overrides) = AnalyzeOverrides(dir);
+
+            // The edge MUST be owned by the overriding METHOD element.
+            Assert.Single(overrides, o => o.ElementName == "loginmodal/oninit-eventargs");
+
+            // And MUST NOT be owned by the class element — a class does not override a method.
+            Assert.DoesNotContain(overrides, o => o.ElementName == "loginmodal");
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    [Fact]
     public void ClassOverride_BclParameterType_TargetRefMatchesTargetElementNaturalKey()
     {
         // The EnvisionWeb `OnInit(EventArgs)` shape: a cross-file override where
@@ -135,10 +181,15 @@ public class LoginModal : AuthenticatedModalBase {
         {
             var (naturalKeys, overrides) = AnalyzeOverrides(dir);
 
-            // The `overrides` edge is attached to the CLASS element (the type
-            // declaration is what ExtractRelationships walks members of), not
-            // the per-method element.
-            var edge = Assert.Single(overrides, o => o.ElementName == "loginmodal");
+            // The `overrides` edge is owned by the overriding METHOD element.
+            // (This assertion previously read `ElementName == "loginmodal"` — the CLASS —
+            // and so PINNED Fathom row `overrides-edge-source-kind-diverges` (3.1.1.6) as
+            // if it were intended behaviour. A prior author noticed the class-sourcing,
+            // wrote it down as an observation, and locked it in, rather than recognising it
+            // contradicted the contract stated in Program.cs directly above the emission
+            // block. That is why a 3rd-instance cross-analyzer divergence survived: the bug
+            // had a test defending it.)
+            var edge = Assert.Single(overrides, o => o.ElementName == "loginmodal/oninit-eventargs");
             Assert.NotNull(edge.TargetRef);
 
             var baseArtifactId = Path.Combine(dir, "Base.cs");
@@ -183,7 +234,8 @@ namespace MyApp {
         {
             var (naturalKeys, overrides) = AnalyzeOverrides(dir);
 
-            var edge = Assert.Single(overrides, o => o.ElementName == "widget");
+            // Owned by the overriding METHOD, not the class (row 3.1.1.6 — see above).
+            var edge = Assert.Single(overrides, o => o.ElementName == "widget/render-customeventargs");
             Assert.NotNull(edge.TargetRef);
 
             var baseArtifactId = Path.Combine(dir, "Base.cs");
