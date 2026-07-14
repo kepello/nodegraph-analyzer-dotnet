@@ -2,6 +2,21 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.61.1] — 2026-07-14
+
+**Docs — the README's capability list described an analyzer that no longer exists.** No code change; the README ships in the package, hence the patch bump.
+
+### Fixed
+
+- **Element kinds** — the list claimed `namespace` and `type-parameter` elements. Neither is emitted: `GetElementType()` (`src/Program.cs:1647-1676`) has no `NamespaceDeclarationSyntax` case (namespaces are *containers*, surviving on the `qualifiedName` facet and `metadata.fullyQualifiedName`), and the kind is `typeParameter`. The list also omitted `destructor`, `event`, `indexer`, `operator`, `accessor`, `enumMember`, `annotation`, and the `project` / `solution` build-file kinds. Rewritten against the switch, including the `record` → `class` / `record struct` → `struct` mapping.
+- **Edges** — the list claimed an `inherits` edge "with the I-prefix interface heuristic". No such edge is emitted and no such heuristic exists: inheritance resolves from **Roslyn symbols** into `extends` / `implements` / `overrides` (`src/Program.cs:2128-2132`, `:2367-2371`). Replaced with the emitted set.
+- **"Class-shape facets pending in a follow-up"** — restated as a deliberate contract position: the analyzer does not emit `classShape`, and is not obliged to, because the engine derives class shape from `contains` children for every language.
+- **Wire-format compatibility** — claimed `^0.5.0`; `package.json` has pinned `@kepello/nodegraph-analysis ^3.45.0` for some time.
+
+### Known non-conformance (filed, not fixed here)
+
+- `partial` is emitted as an edge **`type`** (`src/Program.cs:2526`), but the declared vocabulary makes it a **subtype of `contains`** (`EDGE_SUBTYPE_VOCABULARY.contains`). Filed as Fathom row `dotnet-partial-edge-type-vs-subtype` (3.1.1.9) — an instance of the unenforced-vocabulary class (3.1.1.10), not fixed in a docs release.
+
 ## [0.61.0] — 2026-07-13
 
 **BREAKING (edge shape) — `overrides` edges are now sourced at the overriding METHOD, not the CLASS** (Fathom row `overrides-edge-source-kind-diverges` 3.1.1.6, crit 4).

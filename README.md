@@ -54,18 +54,22 @@ dotnet test tests/NodegraphAnalyzerDotnet.Tests.csproj
 
 ## Status
 
-Emits the `AnalyzerArtifact` wire format defined by `@kepello/nodegraph-analysis` 0.4.0+. Current capabilities:
+Emits the `AnalyzerArtifact` wire format defined by [`@kepello/nodegraph-analysis`](https://github.com/kepello/nodegraph-analysis) — see the [analyzer protocol reference](https://github.com/kepello/nodegraph-analysis/blob/main/docs/analyzer-protocol.md). Current capabilities:
 
-- File discovery + parallel Roslyn parse per `.cs` file
-- Element kinds: file, namespace, class (with `typeKind` flavor for class / struct / record / interface / enum / delegate), method, property, constructor, field, parameter, type-parameter
+- File discovery + parallel Roslyn parse per `.cs` file, plus `.csproj` / `.sln` build-file elements
+- **Element kinds** (source of truth: `GetElementType()` in [src/Program.cs](src/Program.cs)) — `file`, `class`, `interface`, `struct`, `enum`, `method`, `property`, `constructor`, `destructor`, `field`, `event`, `indexer`, `operator`, `accessor`, `enumMember`, `parameter`, `typeParameter`, `annotation`, plus `project` / `solution` from build files.
+  - `record` and `record class` emit as `class`; `record struct` emits as `struct` (both parse to the same Roslyn syntax type, disambiguated only by `.Kind()`).
+  - Local functions emit as `method`.
+  - **Namespaces are containers, not elements** — a type declared under `namespace Foo` is treated as top-level, and the namespace survives on the `qualifiedName` facet and `metadata.fullyQualifiedName`.
+- **Edges** — `contains`, `imports` (subtype `using`), `extends`, `implements`, `overrides`, `calls`, `references`, `partial`, plus intra-class `accessesField` / `callsMethod` (LCOM4 input). Inheritance edges are resolved from **Roslyn symbols**, not name heuristics.
 - Size observations: `linesOfCode`, `physicalLinesOfCode`, `blankLineCount`, `commentLineCount`, `commentDensity`
 - Documentation observations: `hasDocComment`, `docCommentLineCount`, `commentTagCounts` (TODO/FIXME/HACK/XXX/NOTE word-boundary scan)
 - Code-smell observations: `magicNumberCount` (numeric literals outside `{0, 1, -1, 2}` allowlist; skips `const` / `readonly` field declarations)
 - Per-method scalars: `branchCount`, `sonarBranchCount`, `sonarNestingDepthSum`, `maxNestingDepth`, `parameterCount`, `returnStatementCount`, plus all four Halstead inputs (Sonar 2017 cognitive complexity is a clean-room port)
-- Edges: `imports` (using directives), `inherits` (extends/implements with the I-prefix interface heuristic), `accessesField` / `callsMethod` (intra-class, LCOM4 input), `calls` / `references` for cross-class
-- Class-shape facets pending in a follow-up
+- Framework vocabulary: `integrationRole`, `interactionRole`, `uiLifecycle`, `serializationFormats`, `generatedSignals`, `baseTypeRoles`
+- Does **not** emit `classShape` observations — the engine derives class shape from `contains` children.
 
-Wire-format compatibility: ships against `@kepello/nodegraph-analysis ^0.5.0`. Older engine versions accept the additional fields gracefully (the contract is forward-compatible).
+Wire-format compatibility: ships against `@kepello/nodegraph-analysis ^3.45.0` (see `package.json`).
 
 ## License
 
