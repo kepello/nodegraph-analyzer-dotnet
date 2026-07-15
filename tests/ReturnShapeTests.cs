@@ -184,6 +184,85 @@ public class Box {
         finally { Directory.Delete(dir, true); }
     }
 
+    // --- 3.1.1.24: bodyless set-accessor is void BY GRAMMAR, not omitted ---
+    // `HasExtractableBody` gates the whole F6 return-shape pass, so a
+    // body-less set-accessor (auto-property `set;`/`init;`, abstract
+    // property setter) emitted NO `returnKind` — the engine's
+    // methodStereotype rule then fell through to `accessor` (a WRITER
+    // misclassified as a READER). A set-accessor is void by grammar
+    // regardless of body; this must not depend on whether it has one.
+
+    [Fact]
+    public void BodylessAutoPropertySetter_IsVoid()
+    {
+        var dir = MakeTempTree(("AutoBox.cs", @"
+public class AutoBox {
+    public int V { get; set; }
+}"));
+        try
+        {
+            var s = AnalyzeReturnShapes(dir, "AutoBox.cs");
+            var setter = s.First(kv => kv.Key.EndsWith("/set"));
+            Assert.Equal("void", setter.Value.ReturnKind);
+            Assert.False(setter.Value.ReturnsField);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void BodylessInitAccessor_IsVoid()
+    {
+        var dir = MakeTempTree(("Vessel.cs", @"
+public class Vessel {
+    public int V { get; init; }
+}"));
+        try
+        {
+            var s = AnalyzeReturnShapes(dir, "Vessel.cs");
+            // Match the accessor suffix precisely — the class name itself
+            // must not collide with the "init" keyword substring.
+            var setter = s.First(kv => kv.Key.EndsWith("/init"));
+            Assert.Equal("void", setter.Value.ReturnKind);
+            Assert.False(setter.Value.ReturnsField);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void AbstractPropertySetter_IsVoid()
+    {
+        var dir = MakeTempTree(("AbstractBox.cs", @"
+public abstract class AbstractBox {
+    public abstract int V { get; set; }
+}"));
+        try
+        {
+            var s = AnalyzeReturnShapes(dir, "AbstractBox.cs");
+            var setter = s.First(kv => kv.Key.EndsWith("/set"));
+            Assert.Equal("void", setter.Value.ReturnKind);
+            Assert.False(setter.Value.ReturnsField);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void BodylessAutoPropertyGetter_EmitsNoReturnKind_GetterPathUntouched()
+    {
+        var dir = MakeTempTree(("Parcel.cs", @"
+public class Parcel {
+    public int V { get; set; }
+}"));
+        try
+        {
+            var s = AnalyzeReturnShapes(dir, "Parcel.cs");
+            // Match the accessor suffix precisely — the class name itself
+            // must not collide with the "get" keyword substring.
+            var getter = s.First(kv => kv.Key.EndsWith("/get"));
+            Assert.Null(getter.Value.ReturnKind);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
     [Fact]
     public void Constructor_IsReference_AndNotReturnsField()
     {

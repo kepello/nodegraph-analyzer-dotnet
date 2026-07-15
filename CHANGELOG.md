@@ -2,6 +2,29 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.62.0] — 2026-07-15
+
+**Fathom row `bodyless-setter-misclassified-accessor` (3.1.1.24, crit 3) — a WRITER misclassified as a READER.** `ScalarHelpers.HasExtractableBody` gated the WHOLE F6 return-shape pass, so a body-less non-get accessor — an auto-property `set;`/`init;`, or an abstract property setter — emitted no `returnKind` at all. The engine's `methodStereotype` rule (row 3.1.1.23) classifies a set-accessor as `mutator` only when `returnKind === "void"`; with the fact absent, a body-less setter fell through to `accessor` — a set-accessor is void BY GRAMMAR, body or not, and the body-gate never asked the grammar. (`ReturnShapeHelpers.ExtractReturnKind` itself already special-cased non-get accessors as `void` unconditionally — the defect was entirely in the OUTER gate that never called it for a body-less accessor.)
+
+### Fixed
+
+- **`src/Program.cs`** — a new gate ahead of (and independent from) the existing `HasExtractableBody` block: when `node` is a non-get `AccessorDeclarationSyntax` (`set`/`init` — event `add`/`remove` accessors are syntactically impossible without a body in C#, confirmed structurally, see Tests below) with no extractable body, `returnKindFacet`/`returnsFieldFacet` are set to `"void"`/`false` directly. The getter path is UNCHANGED — a body-less getter still correctly emits neither facet.
+
+### Tests
+
+- `tests/ReturnShapeTests.cs` — 4 new fixtures: bodyless auto-property `set;`, bodyless auto-property `init;`, an abstract property setter, and a bodyless auto-property `get;` (regression guard — getter path untouched). **Witnessed RED first**: `dotnet test tests --filter ReturnShapeTests` failed 3/9 pre-fix (`BodylessAutoPropertySetter_IsVoid`, `BodylessInitAccessor_IsVoid`, `AbstractPropertySetter_IsVoid` — all `Expected: "void", Actual: null`); the getter guard passed pre-fix (confirming the getter path was never broken). GREEN after the fix, 9/9.
+- Verified structurally (not asserted from memory): explicit C# event accessor syntax (`event EventHandler Foo { add { } remove { } }`) requires bodies on `add`/`remove` — the compiler rejects a bodiless form outside interfaces, and interface/abstract events use the field-like `event EventHandler Foo;` declaration (`EventFieldDeclarationSyntax`), which never produces per-accessor `AccessorDeclarationSyntax` nodes at all (confirmed by probing the analyzer's own element emission against an interface + abstract-class event declaration — only a single `event`-kind element emits, no `add`/`remove` children). The event add/remove case named in this row's design does not arise in this analyzer's model — not fixed because there is nothing to fix.
+- Suite: **285/285 pass** (was 281, +4 from this row's fixtures, 0 changed elsewhere). `dotnet build` clean; `npm run build` (the `dotnet publish` wrapper) clean.
+
+### Measured — Fathom's own home store (engine API query, not raw SQL, not a re-analyze)
+
+Queried the live `analysis`-domain `accessor`-kind elements via `GraphLayer.queryNodes` (the same wiring `nodegraph-inspect-cli`'s `openGraph` uses) for setter-shaped elements (naturalKey ending `:set`/`:init`) with `returnKind` absent — the exact fact-signature this bug leaves. **13 flip candidates** on Fathom's own store: 3 real (non-fixture) auto-property setters in this package's own `Program.cs` (`AnalyzerArgs`/`AnalyzerConfig`, dogfooded) + 10 in `nodegraph-analyzer-conformance`'s C# fixture corpus (these short-circuit to the `test-fixture` stereotype bucket regardless of `returnKind`, so the `methodStereotype` LABEL won't visibly move for them — but the underlying `returnKind` fact still corrects, which is this row's actual scope). **0 TypeScript candidates** in the same store (see the companion TS analyzer's CHANGELOG). This is a SMALL sample — Fathom's own home store has no large third-party C# corpus; the large auto-property-setter population this row targets is C#-DTO-heavy code (EF Core / TypeORM-shaped domains), whose corpus confirmation rides on row 5.0.118 (those scratch stores are currently polluted) — said plainly, not asserted as measured here.
+- Incidental observation (not fixed here, flagging for the orchestrator): the 3 real `Program.cs` candidates carry a CACHED `methodStereotype` of literal `null`, not `"accessor"` — this looks like a STALE memoized-derivation cache predating row 3.1.1.23's fix (which would compute `"accessor"` for this exact input today), not a live recompute. Worth a follow-up check on whether this store's memoized derivations need a forced refresh independent of this row's fix.
+
+### Pre-prod migration note
+
+A body-less non-get accessor's `returnKind` newly populates (absent → `"void"`) on re-analyze, which flips its `methodStereotype` from `accessor` to `mutator` (row 3.1.1.23's rule already reads this fact — it was just never emitted). Delete `.fathom/graph.db` and re-analyze — no migration path is provided (pre-prod convention).
+
 ## [0.61.1] — 2026-07-14
 
 **Docs — the README's capability list described an analyzer that no longer exists.** No code change; the README ships in the package, hence the patch bump.

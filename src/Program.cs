@@ -677,6 +677,24 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
         string? returnKindFacet = null;
         bool? returnsFieldFacet = null;
 
+        // A set-accessor (`set`/`init`) is void BY GRAMMAR regardless of
+        // whether it has a body — an auto-property `set;`/`init;` or an
+        // abstract property setter never returns a value. The block below
+        // gates the whole F6 pass on `HasExtractableBody`, which silently
+        // dropped `returnKind` for these body-less writers; the engine's
+        // methodStereotype rule then fell through to `accessor` (a WRITER
+        // misclassified as a READER — Fathom row 3.1.1.24). Resolved here,
+        // ahead of and independent from the body-bearing block, so the
+        // getter path (which DOES need a body to have a determinable
+        // return shape) is untouched.
+        if (node is AccessorDeclarationSyntax accVoidByGrammar
+            && !accVoidByGrammar.IsKind(SyntaxKind.GetAccessorDeclaration)
+            && !ScalarHelpers.HasExtractableBody(node))
+        {
+            returnKindFacet = "void";
+            returnsFieldFacet = false;
+        }
+
         // Intra-class edges (slice 3, LCOM4 input): accessesField and
         // callsMethod fire from a method body to a member of the same
         // type. Cross-type references continue to use the existing
