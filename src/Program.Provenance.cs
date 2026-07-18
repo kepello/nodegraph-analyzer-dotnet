@@ -46,4 +46,12 @@ internal static class ProvenanceHelpers
     /// → <c>external-library</c>.</summary>
     internal static string ClassifyExternalProperty(IPropertySymbol prop)
         => prop.IsIndexer ? Dynamic : ExternalLibrary;
+
+    /// <summary>Provenance for an external (no in-source declaration) TYPE
+    /// reference — heritage base/interface, `references` return/parameter
+    /// type, generic constraint, or an overridden member's containing type
+    /// (Fathom rows 3.1.0.15/3.1.0.16). A type has no "dynamic" analogue
+    /// (unlike a property/indexer access) — always
+    /// <c>external-library</c>.</summary>
+    internal static string ClassifyExternalType(INamedTypeSymbol type) => ExternalLibrary;
 }

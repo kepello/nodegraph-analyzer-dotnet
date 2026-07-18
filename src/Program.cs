@@ -516,8 +516,25 @@ static (object[] elements, object[] artifactEdges, object[] problems, object[] l
     }
 
     // First pass: collect declaration names for edge resolution.
+    //
+    // RC1 (Fathom rows 3.1.0.15/3.1.0.16/3.1.0.17, crit 4): AttributeSyntax
+    // names are EXCLUDED here. `allNames` is a flat name-EXISTENCE set with no
+    // per-declaration scoping — an attribute usage (`[WebService]`) feeds its
+    // bare Name into the SAME set as every type/member declaration. An
+    // external base/return/parameter type that happened to share a short name
+    // with some in-file attribute (`System.Web.Services.WebService` vs an
+    // in-file `[WebService]`) then satisfied `allNames.Contains(name)` even
+    // though nothing about the attribute has any bearing on that type
+    // reference — the escape that let bare, untagged, dangling edges past the
+    // gate. Attribute names are never referenced as base types or called as
+    // methods, so removing them from allNames is safe for its two remaining
+    // consumers (the in-file-call limitation and event-handler fallback,
+    // both below) and closes the escape at its source. The heritage/
+    // references/generic-constraint/overrides sites no longer consult
+    // allNames at all — they resolve via the Roslyn symbol (ResolveTypeRef).
     foreach (var node in root.DescendantNodes())
     {
+        if (node is AttributeSyntax) continue;
         var rawName = GetDeclarationName(node);
         if (rawName == null) continue;
         allNames.Add(rawName);
@@ -1836,34 +1853,66 @@ static object[] ExtractRelationships(
         relationships.Add(new { type, subtype, targetName = canonical, metadata });
     }
 
-    // Project-level resolver: try to resolve a syntax node to a cross-file
-    // declaration's target file via the shared SemanticModel. Returns null
-    // for same-file targets, external library symbols, or unresolvable
-    // identifiers. Per language-conformance B2.
-    string? ResolveTargetFile(SyntaxNode refNode)
+    // Fathom rows 3.1.0.15/3.1.0.16 (crit 4): a type-reference edge whose
+    // symbol is genuinely UNRESOLVABLE (degraded compilation, typo, missing
+    // reference — see `ResolveTypeRef`'s `null` case) is DROPPED rather than
+    // emitted as a bare, unbindable, dangling edge. The drop is recorded as a
+    // structured Limitation — mirrors the established `unresolved-call`
+    // pattern (in-file-call fallback / event-handler fallback, below) so a
+    // resolution failure is loud and inspectable instead of silent.
+    void RecordUnresolvedTypeRef(string edgeLabel, SyntaxNode typeNode, string rawName)
     {
-        try
+        var span = typeNode.GetLocation().GetLineSpan();
+        limitations.Add(new Dictionary<string, object?>
         {
-            var symbolInfo = semanticModel.GetSymbolInfo(refNode);
-            var symbol = symbolInfo.Symbol ?? symbolInfo.CandidateSymbols.FirstOrDefault();
-            if (symbol == null) return null;
-            // Follow aliases (e.g., `using Foo = SomeNs.SomeType`) to the
-            // underlying declaration.
-            if (symbol is IAliasSymbol alias) symbol = alias.Target;
-            // Synthetic generated-companion declarations (5.0.87) are
-            // compilation-only — a targetRef to them would dangle. Resolve to
-            // the first REAL declaration, or nothing.
-            var declRef = WebFormsCompanion.FirstNonCompanionDeclRef(symbol.DeclaringSyntaxReferences);
-            if (declRef == null) return null;
-            var declFilePath = canonicalizeFilePath(declRef.SyntaxTree.FilePath);
-            if (string.IsNullOrEmpty(declFilePath)) return null;
-            if (declFilePath == currentFilePath) return null;
-            return declFilePath;
-        }
-        catch
+            ["kind"] = "unresolved-type-ref",
+            ["severity"] = "minor",
+            ["location"] = new Dictionary<string, object?>
+            {
+                ["file"] = currentFilePath,
+                ["startLine"] = span.StartLinePosition.Line + 1,
+                ["endLine"] = span.EndLinePosition.Line + 1,
+            },
+            ["description"] = $"Type reference '{rawName}' ({edgeLabel}) could not be resolved to a "
+                + "declaration or an external symbol (degraded compilation, typo, or missing reference); "
+                + "edge omitted rather than emitting an unbindable bare-name target.",
+            ["metadata"] = new Dictionary<string, object?> { ["typeName"] = rawName },
+        });
+    }
+
+    // Predefined (`void`/`int`/`string`/`bool`/`object`/…), array, nullable,
+    // and tuple type SYNTAX are excluded from symbol-based `references`
+    // resolution (return-type/parameter-type sites only — see call sites).
+    // Every predefined-type keyword resolves to a genuine external
+    // `INamedTypeSymbol` (`System.Void`, `System.Int32`, …) exactly like any
+    // other BCL type, so without this guard the symbol-based fix would
+    // manufacture a `references` edge to a compiler primitive on nearly
+    // every method — a new class of noise the pre-fix `allNames` gate never
+    // produced (a bare "void"/"int[]"/"Foo?" text never matched a
+    // declaration name) and that 3.1.0.15/.16 does not ask for. Heritage
+    // bases and generic constraints can't syntactically be these shapes, so
+    // this guard is a no-op there.
+    static bool IsNamedTypeRefEligible(TypeSyntax t) =>
+        t is not (PredefinedTypeSyntax or ArrayTypeSyntax or NullableTypeSyntax or TupleTypeSyntax);
+
+    // Shared emit for the fixed-shape type-reference sites (`references`
+    // return-type / parameter-type / generic-constraint) — resolve via
+    // `ResolveTypeRef` and route the 3-way verdict to the right emitter.
+    // Heritage has its own inline call site because its type/subtype
+    // (`extends` vs `implements`) is decided FROM the verdict's `Kind`.
+    void EmitTypeRefEdge(string type, string subtype, SyntaxNode typeNode, string edgeLabel, string rawName)
+    {
+        var verdict = ResolveTypeRef(typeNode);
+        if (verdict == null)
         {
-            return null;
+            RecordUnresolvedTypeRef(edgeLabel, typeNode, rawName);
+            return;
         }
+        var v = verdict.Value;
+        if (v.IsExternal)
+            AddExternal(type, subtype, v.Name, ProvenanceHelpers.ExternalLibrary);
+        else
+            AddWithTargetRef(type, subtype, v.Name, v.FilePath);
     }
 
     // Project-level call resolver: resolves a call site to the target
@@ -1939,6 +1988,78 @@ static object[] ExtractRelationships(
             // the canonical element key for the class / struct / interface.
             var qualifiedRaw = GetQualifiedRawName(declNode, declName);
             return (declFilePath, qualifiedRaw);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    // Symbol-based 3-way TYPE-REFERENCE verdict (Fathom rows 3.1.0.15
+    // heritage/overrides + 3.1.0.16 references + 3.1.0.17 RC1, crit 4). The
+    // single resolution shared by every "is this base/return/parameter/
+    // constraint type in-source, external, or unresolvable" site. Replaces
+    // the `allNames` name-EXISTENCE gate those sites used to consult:
+    // `allNames` cannot tell "external BCL/NuGet type" from "genuinely
+    // unresolvable" — both come back with ResolveTargetFile == null — so the
+    // old code pressed allNames in as the disambiguator, and a same-named
+    // in-file declaration (an attribute usage, most often — RC1) made the
+    // gate pass for an external type as if it were in-source, emitting a
+    // BARE, untagged, dangling edge. The Roslyn symbol already resolvable at
+    // every one of these call sites answers the split directly:
+    //   null                              → UNRESOLVED (no symbol, or an
+    //                                        `IErrorTypeSymbol`/TypeKind.Error
+    //                                        — degraded compilation, typo,
+    //                                        missing reference). Caller drops
+    //                                        the edge and records a
+    //                                        Limitation; never a phantom.
+    //   (IsExternal: true,  Name: fqn,
+    //    FilePath: null,    Kind)          → EXTERNAL (a real symbol with NO
+    //                                        in-source declaration — BCL /
+    //                                        referenced NuGet). Caller emits
+    //                                        the AddExternal-shaped edge
+    //                                        (metadata.external +
+    //                                        resolutionProvenance), no
+    //                                        targetRef.
+    //   (IsExternal: false, Name: qual,
+    //    FilePath: file,    Kind)          → IN-SOURCE. Built from the
+    //                                        DECLARATION SYNTAX via
+    //                                        GetQualifiedRawName — same
+    //                                        construction as
+    //                                        ResolveTypeTarget/
+    //                                        ResolveIdentifierTarget, so it
+    //                                        handles nested `outer/inner`
+    //                                        qualification and cross-file
+    //                                        resolution uniformly. Caller
+    //                                        emits AddWithTargetRef.
+    // `Kind` carries the symbol's Roslyn `TypeKind` (Interface / Class / …)
+    // so a heritage caller can classify extends-vs-implements on the actual
+    // stereotype instead of the `I`+uppercase name heuristic, which
+    // mis-classified an `I`+digit interface (`I3D`) as a class base.
+    (bool IsExternal, string Name, string? FilePath, TypeKind Kind)? ResolveTypeRef(SyntaxNode typeNode)
+    {
+        try
+        {
+            var symbolInfo = semanticModel.GetSymbolInfo(typeNode);
+            var symbol = symbolInfo.Symbol ?? symbolInfo.CandidateSymbols.FirstOrDefault();
+            if (symbol is IAliasSymbol alias) symbol = alias.Target;
+            if (symbol is not INamedTypeSymbol named) return null; // null / non-type (e.g. type parameter)
+            if (named.TypeKind == TypeKind.Error) return null; // unresolvable — never masquerade as external
+            var declRef = WebFormsCompanion.FirstNonCompanionDeclRef(named.DeclaringSyntaxReferences);
+            if (declRef == null)
+            {
+                // No in-source declaration → external (BCL / referenced NuGet).
+                var fqn = named.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+                if (fqn.StartsWith("global::")) fqn = fqn.Substring("global::".Length);
+                return (true, fqn, null, named.TypeKind);
+            }
+            var declFilePath = canonicalizeFilePath(declRef.SyntaxTree.FilePath);
+            if (string.IsNullOrEmpty(declFilePath)) return null;
+            var declNode = declRef.GetSyntax();
+            var declName = GetDeclarationName(declNode);
+            if (declName == null) return null;
+            var qualifiedRaw = GetQualifiedRawName(declNode, declName);
+            return (false, qualifiedRaw, declFilePath, named.TypeKind);
         }
         catch
         {
@@ -2134,20 +2255,34 @@ static object[] ExtractRelationships(
         var baseTypes = typeDecl.BaseList.Types.ToList();
         for (var i = 0; i < baseTypes.Count; i++)
         {
-            var name = baseTypes[i].Type.ToString().Split('<')[0].Split('.').Last();
-            // Cross-file resolver: even when the local file doesn't list
-            // the base type, the shared Compilation can resolve it.
-            var targetFile = ResolveTargetFile(baseTypes[i].Type);
-            if (!allNames.Contains(name) && targetFile == null) continue;
-            var isInterfaceShaped = name.Length >= 2 && name[0] == 'I' && char.IsUpper(name[1]);
-            var isExtends = isClass && i == 0 && !isInterfaceShaped;
+            var baseTypeNode = baseTypes[i].Type;
+            var rawName = baseTypeNode.ToString().Split('<')[0].Split('.').Last();
+            // Symbol-based verdict replaces the `allNames` name-existence
+            // gate (Fathom rows 3.1.0.15/3.1.0.17, crit 4) — see
+            // ResolveTypeRef. Resolves cross-file AND external/BCL bases
+            // uniformly; unresolvable bases drop with a Limitation instead
+            // of a bare dangling edge.
+            var verdict = ResolveTypeRef(baseTypeNode);
+            if (verdict == null)
+            {
+                RecordUnresolvedTypeRef(isClass && i == 0 ? "extends" : "implements", baseTypeNode, rawName);
+                continue;
+            }
+            var v = verdict.Value;
+            // The symbol's TypeKind — not the `I`+uppercase name heuristic
+            // (Fathom row 3.1.0.15) — decides extends vs implements. The old
+            // heuristic mis-classified an `I`+digit interface (`I3D`) as a
+            // class base because `char.IsUpper('3')` is false.
+            var isExtends = isClass && i == 0 && v.Kind != TypeKind.Interface;
             if (isExtends)
             {
-                AddWithTargetRef("extends", "class", name, targetFile);
+                if (v.IsExternal) AddExternal("extends", "class", v.Name, ProvenanceHelpers.ExternalLibrary);
+                else AddWithTargetRef("extends", "class", v.Name, v.FilePath);
             }
             else
             {
-                AddWithTargetRef("implements", "explicit", name, targetFile);
+                if (v.IsExternal) AddExternal("implements", "explicit", v.Name, ProvenanceHelpers.ExternalLibrary);
+                else AddWithTargetRef("implements", "explicit", v.Name, v.FilePath);
             }
         }
     }
@@ -2162,20 +2297,35 @@ static object[] ExtractRelationships(
     if (node is MethodDeclarationSyntax method)
     {
         // Per language-conformance B1: `references` with subtype
-        // `return-type` / `parameter-type`. Under project-level
-        // resolution (Stage 3b), cross-file targets emit targetRef.
-        var returnType = method.ReturnType.ToString().Split('<')[0].Split('.').Last();
-        var returnTargetFile = ResolveTargetFile(method.ReturnType);
-        if ((allNames.Contains(returnType) || returnTargetFile != null) && returnType != GetDeclarationName(node))
-            AddWithTargetRef("references", "return-type", returnType, returnTargetFile);
+        // `return-type` / `parameter-type`. Symbol-based verdict (Fathom row
+        // 3.1.0.16) resolves cross-file AND external/BCL types uniformly,
+        // replacing the `allNames` gate (see ResolveTypeRef).
+        //
+        // `IsNamedTypeRefEligible` excludes predefined/array/nullable/tuple
+        // type syntax — every `void`/`int`/`string`/`object` return or
+        // parameter type resolves to a REAL external BCL symbol
+        // (`System.Void`/`System.Int32`/…, confirmed empirically: Roslyn
+        // resolves predefined-type syntax to a genuine `INamedTypeSymbol`
+        // with zero declaring syntax references, same shape as any other
+        // BCL type). Routing those through the external-tag path would
+        // manufacture a `references` edge to a compiler primitive on
+        // essentially every method in the corpus — pre-fix these NEVER
+        // emitted (the bare-name `allNames` gate never matched "void"/
+        // "int[]"/"Foo?"), and turning that on is out of this fix's scope
+        // (3.1.0.15/.16 is about untagged DANGLING edges to declared
+        // class/interface bases, not a new class of primitive-type noise).
+        // Preserved as a silent no-op — exactly the pre-fix behavior for
+        // these shapes.
+        var returnTypeRawName = method.ReturnType.ToString().Split('<')[0].Split('.').Last();
+        if (IsNamedTypeRefEligible(method.ReturnType) && returnTypeRawName != GetDeclarationName(node))
+            EmitTypeRefEdge("references", "return-type", method.ReturnType, "references/return-type", returnTypeRawName);
 
         foreach (var param in method.ParameterList.Parameters)
         {
             if (param.Type == null) continue;
-            var paramType = param.Type.ToString().Split('<')[0].Split('.').Last();
-            var paramTargetFile = ResolveTargetFile(param.Type);
-            if (allNames.Contains(paramType) || paramTargetFile != null)
-                AddWithTargetRef("references", "parameter-type", paramType, paramTargetFile);
+            if (!IsNamedTypeRefEligible(param.Type)) continue;
+            EmitTypeRefEdge("references", "parameter-type", param.Type, "references/parameter-type",
+                param.Type.ToString().Split('<')[0].Split('.').Last());
         }
     }
 
@@ -2384,8 +2534,31 @@ static object[] ExtractRelationships(
                     var targetRef = NaturalKeyCodec.MakeNaturalKey(parentTargetFile, canonical);
                     relationships.Add(new { type = "overrides", targetName = canonical, targetRef });
                 }
+                else if (parentDeclRef == null)
+                {
+                    // RC2 (Fathom row 3.1.0.15, crit 4; the MAJORITY defect
+                    // shape — 33/42 measured danglers): an override of a
+                    // member with NO declaring syntax reference at all is an
+                    // EXTERNAL (BCL/NuGet) parent (`Page.OnInit`,
+                    // `JsonConverter.ReadJson`, `Object.Equals`,
+                    // `IDisposable.Dispose`, …). This block had no gate and
+                    // no external tag — every override of a resolved-
+                    // external member fell to the bare untagged emit below
+                    // and danglED under the strict edge gate. Tag it the
+                    // same way every other external edge family does
+                    // (`AddExternal`'s shape) instead.
+                    var metadata = new Dictionary<string, object?>
+                    {
+                        ["external"] = true,
+                        ["resolutionProvenance"] = ProvenanceHelpers.ExternalLibrary,
+                    };
+                    relationships.Add(new { type = "overrides", targetName = canonical, metadata });
+                }
                 else
                 {
+                    // Same-file in-source parent — targetRef omitted per
+                    // protocol convention (bare targetName resolves within
+                    // the emitting artifact). Unchanged.
                     relationships.Add(new { type = "overrides", targetName = canonical });
                 }
             }
@@ -2483,12 +2656,14 @@ static object[] ExtractRelationships(
         }
     }
 
-    // Generic-constraint references: resolve `where T : IRepo` the same way
-    // type-position sites (return-type / parameter-type) do — ResolveTargetFile
-    // for the cross-file targetRef. Workspace-resolved (same-file or cross-file)
-    // → AddWithTargetRef; external (e.g. `IDisposable`) → null → no edge
-    // (Fathom row dotnet-l0-ref-qualification 5.0.93). Pre-fix the allNames
-    // gate missed cross-file types entirely and emitted bare for same-file ones.
+    // Generic-constraint references: resolve `where T : IRepo` via the same
+    // symbol-based verdict as the other type-reference sites (Fathom row
+    // 3.1.0.16) — external constraint types (e.g. `IDisposable`) now emit an
+    // external-tagged edge instead of silently dropping (Fathom row
+    // dotnet-l0-ref-qualification 5.0.93 established the drop; 3.1.0.16
+    // upgrades it to tagged-emit, consistent with heritage/references).
+    // Pre-fix the allNames gate missed cross-file types entirely and emitted
+    // bare for same-file ones.
     {
         IEnumerable<TypeParameterConstraintClauseSyntax> constraintClauses = node switch
         {
@@ -2503,12 +2678,7 @@ static object[] ExtractRelationships(
                 var constraintType = constraint.Type;
                 var constraintName = constraintType.ToString().Split('<')[0].Split('.').Last();
                 if (constraintName == GetDeclarationName(node)) continue;
-                var constraintTargetFile = ResolveTargetFile(constraintType);
-                // constraintTargetFile == null means either same-file or external.
-                // allNames check disambiguates: same-file workspace types are in
-                // allNames; external types are not (BCL/library not walked).
-                if (constraintTargetFile != null || allNames.Contains(constraintName))
-                    AddWithTargetRef("references", "generic-constraint", constraintName, constraintTargetFile);
+                EmitTypeRefEdge("references", "generic-constraint", constraintType, "references/generic-constraint", constraintName);
             }
         }
     }
@@ -2561,9 +2731,9 @@ static object[] ExtractRelationships(
         if (idName == GetDeclarationName(node)) continue;
         // Skip identifiers that sit in a type-position already handled by a
         // higher-specificity path (return-type, parameter-type, generic-constraint,
-        // base-type). Those paths resolve via ResolveTargetFile + AddWithTargetRef;
-        // re-processing them here would produce duplicates or — worse — a bare
-        // identifier edge that shadows the qualified one.
+        // base-type). Those paths resolve via ResolveTypeRef + AddWithTargetRef/
+        // AddExternal; re-processing them here would produce duplicates or —
+        // worse — a bare identifier edge that shadows the qualified one.
         if (id.Parent is TypeConstraintSyntax) continue;
         if (id.Parent is SimpleBaseTypeSyntax) continue;
 
