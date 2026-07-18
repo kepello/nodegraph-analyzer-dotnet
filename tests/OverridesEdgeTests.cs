@@ -248,6 +248,95 @@ namespace MyApp {
     }
 
     [Fact]
+    public void NestedInterfaceImplementation_SameFile_TargetNameCarriesOuterQualifier()
+    {
+        // Fathom row 3.1.0.15 (follow-on) — the SMTP.cs survivor, the last RC3
+        // instance: a clean rebuild of a real C# app under the armed strict
+        // edge gate went from 34 unresolvable edges down to exactly 1, this
+        // shape. The implementing method lives in a NESTED type
+        // (`Smtp.SmtpWrapper`) and implements an interface (`Smtp.ISmtpClient`)
+        // ALSO nested under the same outer scope. The target element's own
+        // key carries the outer qualifier (`smtp/ismtpclient/send-mailmessage`)
+        // because `GetQualifiedRawName` walks the nesting; the `overrides`
+        // emitter built its `parentQualified` from the parent TYPE's SHORT
+        // `.Name` (`ismtpclient`) instead, so the emitted `targetName` came
+        // out unqualified (`ismtpclient/send-mailmessage`).
+        //
+        // Same-file edges emit NO targetRef — the ingest layer synthesizes a
+        // self-file key from `targetName` alone — so the unqualified emit was
+        // a PERMANENT dangler, not just a superficial mismatch.
+        var dir = MakeTempTree(("Smtp.cs", @"
+public class MailMessage {}
+public class Smtp {
+    public interface ISmtpClient {
+        void Send(MailMessage message);
+    }
+    public class SmtpWrapper : ISmtpClient {
+        public void Send(MailMessage message) { }
+    }
+}"));
+        try
+        {
+            var (naturalKeys, overrides) = AnalyzeOverrides(dir);
+
+            var edge = Assert.Single(overrides, o => o.ElementName == "smtp/smtpwrapper/send-mailmessage");
+
+            // Same-file: no targetRef by convention (bare targetName resolves
+            // within the emitting artifact via ingest's self-file synthesis).
+            Assert.Null(edge.TargetRef);
+
+            var artifactId = Path.Combine(dir, "Smtp.cs");
+            var expectedTargetKey = naturalKeys[$"{artifactId}#smtp/ismtpclient/send-mailmessage"];
+            Assert.False(string.IsNullOrEmpty(expectedTargetKey), "target element must exist and carry a naturalKey");
+
+            // The self-file key-synthesis contract: targetName itself must
+            // carry the outer qualifier, or ingest lands on the wrong key.
+            Assert.Equal("smtp/ismtpclient/send-mailmessage", edge.TargetName);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
+    public void NestedBaseType_CrossFile_TargetRefMatchesTargetElementNaturalKey()
+    {
+        // Fathom row 3.1.0.15 (follow-on): the cross-file half of the same
+        // defect. The overridden method's parent TYPE (`WidgetBase`) is
+        // nested inside `Container`, declared in a DIFFERENT file than the
+        // override. The `targetRef` is built via
+        // `MakeNaturalKey(parentTargetFile, canonical)` — `canonical` must
+        // carry the `container/widgetbase` qualifier or the ref permanently
+        // dangles cross-file, same failure shape as the same-file case but
+        // through the targetRef path instead of ingest's self-file synthesis.
+        var dir = MakeTempTree(
+            ("Base.cs", @"
+public class Container {
+    public abstract class WidgetBase {
+        public virtual void Render() { }
+    }
+}"),
+            ("Derived.cs", @"
+public class Widget : Container.WidgetBase {
+    public override void Render() { }
+}"));
+        try
+        {
+            var (naturalKeys, overrides) = AnalyzeOverrides(dir);
+
+            var edge = Assert.Single(overrides, o => o.ElementName == "widget/render");
+            Assert.NotNull(edge.TargetRef);
+
+            var baseArtifactId = Path.Combine(dir, "Base.cs");
+            var expectedTargetKey = naturalKeys[$"{baseArtifactId}#container/widgetbase/render"];
+            Assert.False(string.IsNullOrEmpty(expectedTargetKey), "target element must exist and carry a naturalKey");
+
+            // Byte-identical to the target element's own naturalKey, not
+            // just superficially similar.
+            Assert.Equal(expectedTargetKey, edge.TargetRef);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
+
+    [Fact]
     public void ClassOverride_CsprojCompileIncludeCasingDivergesFromDisk_TargetRefStillMatchesTargetElementNaturalKey()
     {
         // Fathom row 3.1.0.15 (follow-on): every OTHER cross-file targetRef

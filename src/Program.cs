@@ -2578,6 +2578,30 @@ static object[] ExtractRelationships(
                     parentParamSig = "(" + string.Join(",", parent.Parameters.Select(p =>
                         p.Type.ToDisplayString().Replace("/", "-").Replace(" ", ""))) + ")";
                 }
+
+                // Nested-type qualification (Fathom row 3.1.0.15 follow-on —
+                // the last RC3 instance). `parentTypeName` above is the
+                // parent TYPE's SHORT `.Name` — fine for a top-level type,
+                // but wrong when the parent type is NESTED: the target
+                // method element's own key is built by `GetQualifiedRawName`
+                // walking the FULL `outer/inner` nesting (same machinery the
+                // heritage/references/generic-constraint paths were routed
+                // through in 0.63.0), so a short-name `parentQualified` here
+                // permanently dangles both the same-file case (ingest
+                // synthesizes the self-file key from `targetName` alone) and
+                // the cross-file case (`targetRef` below is keyed off the
+                // same short name). Only for IN-SOURCE parents
+                // (`parentDeclRef != null`) — an EXTERNAL parent (BCL/NuGet,
+                // no declaring syntax reference at all) has no in-source
+                // qualified form to derive and stays on the short name,
+                // informational-only since that branch emits no targetRef.
+                if (parentDeclRef != null
+                    && parent.ContainingType.DeclaringSyntaxReferences.FirstOrDefault()?.GetSyntax()
+                        is BaseTypeDeclarationSyntax parentTypeDeclSyntax)
+                {
+                    parentTypeName = GetQualifiedRawName(parentTypeDeclSyntax, parentTypeDeclSyntax.Identifier.Text);
+                }
+
                 var parentQualified = $"{parentTypeName}/{parentMethodName}{parentParamSig}";
                 var canonical = CanonicalizePath(parentQualified);
                 if (string.IsNullOrEmpty(canonical)) continue;
