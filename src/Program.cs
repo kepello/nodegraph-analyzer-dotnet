@@ -1855,17 +1855,28 @@ static object[] ExtractRelationships(
 
     // Fathom rows 3.1.0.15/3.1.0.16 (crit 4): a type-reference edge whose
     // symbol is genuinely UNRESOLVABLE (degraded compilation, typo, missing
-    // reference — see `ResolveTypeRef`'s `null` case) is DROPPED rather than
-    // emitted as a bare, unbindable, dangling edge. The drop is recorded as a
-    // structured Limitation — mirrors the established `unresolved-call`
-    // pattern (in-file-call fallback / event-handler fallback, below) so a
-    // resolution failure is loud and inspectable instead of silent.
+    // reference — see `ResolveTypeRef`'s `Unresolved` verdict) is DROPPED
+    // rather than emitted as a bare, unbindable, dangling edge. The drop is
+    // recorded as a structured Limitation — mirrors the established
+    // `unresolved-call` pattern (in-file-call fallback / event-handler
+    // fallback, below) so a resolution failure is loud and inspectable
+    // instead of silent.
+    //
+    // `kind` is `"unresolved-reference"` — the pre-existing, REGISTERED
+    // Limitation kind (`nodegraph-limitations/src/schema.ts` +
+    // `overlay.ts` ALL_KINDS, `nodegraph-analysis/src/conformance-types.ts`
+    // LimitationKind — "Type/field reference unresolvable."). The original
+    // fix minted a new, unregistered `"unresolved-type-ref"` kind:
+    // `insertLimitation` → `validateInput` throws on an unrecognized kind,
+    // `ingestFromArtifacts` catches and drops the throw, so every drop-path
+    // Limitation VANISHED silently at overlay ingest — a conservation break
+    // (reviewer-round-2 finding #1).
     void RecordUnresolvedTypeRef(string edgeLabel, SyntaxNode typeNode, string rawName)
     {
         var span = typeNode.GetLocation().GetLineSpan();
         limitations.Add(new Dictionary<string, object?>
         {
-            ["kind"] = "unresolved-type-ref",
+            ["kind"] = "unresolved-reference",
             ["severity"] = "minor",
             ["location"] = new Dictionary<string, object?>
             {
@@ -1897,22 +1908,33 @@ static object[] ExtractRelationships(
 
     // Shared emit for the fixed-shape type-reference sites (`references`
     // return-type / parameter-type / generic-constraint) — resolve via
-    // `ResolveTypeRef` and route the 3-way verdict to the right emitter.
+    // `ResolveTypeRef` and route the 4-way verdict to the right emitter.
     // Heritage has its own inline call site because its type/subtype
     // (`extends` vs `implements`) is decided FROM the verdict's `Kind`.
     void EmitTypeRefEdge(string type, string subtype, SyntaxNode typeNode, string edgeLabel, string rawName)
     {
         var verdict = ResolveTypeRef(typeNode);
-        if (verdict == null)
+        switch (verdict.Resolution)
         {
-            RecordUnresolvedTypeRef(edgeLabel, typeNode, rawName);
-            return;
+            case TypeRefVerdictKind.NotApplicable:
+                // A generic TYPE PARAMETER (`ITypeParameterSymbol`) is a
+                // fully-resolved symbol, not a resolution failure — it is
+                // not-applicable for a type-reference EDGE (no element to
+                // point at). Emit neither an edge nor a Limitation
+                // (reviewer-round-2 finding #2).
+                return;
+            case TypeRefVerdictKind.Unresolved:
+                RecordUnresolvedTypeRef(edgeLabel, typeNode, rawName);
+                return;
+            case TypeRefVerdictKind.External:
+                AddExternal(type, subtype, verdict.Name!, ProvenanceHelpers.ExternalLibrary);
+                return;
+            case TypeRefVerdictKind.InSource:
+                AddWithTargetRef(type, subtype, verdict.Name!, verdict.FilePath);
+                return;
+            default:
+                throw new InvalidOperationException($"Unhandled {nameof(TypeRefVerdictKind)}: {verdict.Resolution}");
         }
-        var v = verdict.Value;
-        if (v.IsExternal)
-            AddExternal(type, subtype, v.Name, ProvenanceHelpers.ExternalLibrary);
-        else
-            AddWithTargetRef(type, subtype, v.Name, v.FilePath);
     }
 
     // Project-level call resolver: resolves a call site to the target
@@ -1995,34 +2017,55 @@ static object[] ExtractRelationships(
         }
     }
 
-    // Symbol-based 3-way TYPE-REFERENCE verdict (Fathom rows 3.1.0.15
-    // heritage/overrides + 3.1.0.16 references + 3.1.0.17 RC1, crit 4). The
-    // single resolution shared by every "is this base/return/parameter/
-    // constraint type in-source, external, or unresolvable" site. Replaces
-    // the `allNames` name-EXISTENCE gate those sites used to consult:
-    // `allNames` cannot tell "external BCL/NuGet type" from "genuinely
-    // unresolvable" — both come back with ResolveTargetFile == null — so the
-    // old code pressed allNames in as the disambiguator, and a same-named
-    // in-file declaration (an attribute usage, most often — RC1) made the
-    // gate pass for an external type as if it were in-source, emitting a
-    // BARE, untagged, dangling edge. The Roslyn symbol already resolvable at
-    // every one of these call sites answers the split directly:
-    //   null                              → UNRESOLVED (no symbol, or an
+    // Symbol-based 4-way TYPE-REFERENCE verdict (Fathom rows 3.1.0.15
+    // heritage/overrides + 3.1.0.16 references + 3.1.0.17 RC1, crit 4; the
+    // NotApplicable member added in reviewer-round-2 finding #2). The single
+    // resolution shared by every "is this base/return/parameter/constraint
+    // type in-source, external, not-applicable, or unresolvable" site.
+    // Replaces the `allNames` name-EXISTENCE gate those sites used to
+    // consult: `allNames` cannot tell "external BCL/NuGet type" from
+    // "genuinely unresolvable" — both come back with ResolveTargetFile ==
+    // null — so the old code pressed allNames in as the disambiguator, and a
+    // same-named in-file declaration (an attribute usage, most often — RC1)
+    // made the gate pass for an external type as if it were in-source,
+    // emitting a BARE, untagged, dangling edge. The Roslyn symbol already
+    // resolvable at every one of these call sites answers the split
+    // directly:
+    //   Resolution: NotApplicable        → NOT A TYPE-REFERENCE TARGET (a
+    //                                        resolved `ITypeParameterSymbol`
+    //                                        — `T`/`U` in `Get<T>(T item)` /
+    //                                        `where T : U`). A type
+    //                                        parameter is fully resolved; it
+    //                                        just isn't an edge target. Caller
+    //                                        emits NEITHER an edge NOR a
+    //                                        Limitation — collapsing this
+    //                                        into Unresolved is exactly the
+    //                                        no-silent-degradation bug this
+    //                                        member exists to prevent.
+    //   Resolution: Unresolved           → UNRESOLVED (no symbol, or an
     //                                        `IErrorTypeSymbol`/TypeKind.Error
     //                                        — degraded compilation, typo,
     //                                        missing reference). Caller drops
-    //                                        the edge and records a
+    //                                        the edge and records a loud
+    //                                        `unresolved-reference`
     //                                        Limitation; never a phantom.
-    //   (IsExternal: true,  Name: fqn,
-    //    FilePath: null,    Kind)          → EXTERNAL (a real symbol with NO
+    //   Resolution: External,
+    //   Name: fqn, FilePath: null, Kind  → EXTERNAL (a real symbol with NO
     //                                        in-source declaration — BCL /
-    //                                        referenced NuGet). Caller emits
-    //                                        the AddExternal-shaped edge
+    //                                        referenced NuGet). `fqn` is built
+    //                                        with `WithGlobalNamespaceStyle
+    //                                        (Omitted)` so no `global::` token
+    //                                        survives ANYWHERE in the string
+    //                                        — including inside a generic type
+    //                                        ARGUMENT (`List<global::Foo>`),
+    //                                        which a leading-only strip
+    //                                        missed. Caller emits the
+    //                                        AddExternal-shaped edge
     //                                        (metadata.external +
     //                                        resolutionProvenance), no
     //                                        targetRef.
-    //   (IsExternal: false, Name: qual,
-    //    FilePath: file,    Kind)          → IN-SOURCE. Built from the
+    //   Resolution: InSource,
+    //   Name: qual, FilePath: file, Kind → IN-SOURCE. Built from the
     //                                        DECLARATION SYNTAX via
     //                                        GetQualifiedRawName — same
     //                                        construction as
@@ -2036,34 +2079,48 @@ static object[] ExtractRelationships(
     // so a heritage caller can classify extends-vs-implements on the actual
     // stereotype instead of the `I`+uppercase name heuristic, which
     // mis-classified an `I`+digit interface (`I3D`) as a class base.
-    (bool IsExternal, string Name, string? FilePath, TypeKind Kind)? ResolveTypeRef(SyntaxNode typeNode)
+    (TypeRefVerdictKind Resolution, string? Name, string? FilePath, TypeKind Kind) ResolveTypeRef(SyntaxNode typeNode)
     {
         try
         {
             var symbolInfo = semanticModel.GetSymbolInfo(typeNode);
             var symbol = symbolInfo.Symbol ?? symbolInfo.CandidateSymbols.FirstOrDefault();
             if (symbol is IAliasSymbol alias) symbol = alias.Target;
-            if (symbol is not INamedTypeSymbol named) return null; // null / non-type (e.g. type parameter)
-            if (named.TypeKind == TypeKind.Error) return null; // unresolvable — never masquerade as external
+            // A generic TYPE PARAMETER (`T`/`U`) is a fully-resolved symbol —
+            // NOT a resolution failure — but it also isn't an
+            // `INamedTypeSymbol` and can't be a type-reference edge target.
+            // Distinct from `Unresolved` (reviewer-round-2 finding #2): a
+            // shared `null`/`Unresolved` bucket for both wrongly emitted an
+            // `unresolved-reference` Limitation for `T Get<T>(T item)` and
+            // `where T : U`, neither of which is a resolution failure.
+            if (symbol is ITypeParameterSymbol) return (TypeRefVerdictKind.NotApplicable, null, null, default);
+            if (symbol is not INamedTypeSymbol named) return (TypeRefVerdictKind.Unresolved, null, null, default);
+            if (named.TypeKind == TypeKind.Error) return (TypeRefVerdictKind.Unresolved, null, null, default); // never masquerade as external
             var declRef = WebFormsCompanion.FirstNonCompanionDeclRef(named.DeclaringSyntaxReferences);
             if (declRef == null)
             {
-                // No in-source declaration → external (BCL / referenced NuGet).
-                var fqn = named.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-                if (fqn.StartsWith("global::")) fqn = fqn.Substring("global::".Length);
-                return (true, fqn, null, named.TypeKind);
+                // No in-source declaration → external (BCL / referenced
+                // NuGet). `WithGlobalNamespaceStyle(Omitted)` suppresses
+                // `global::` everywhere in the display string — not just a
+                // leading occurrence — so a generic type ARGUMENT
+                // (`List<global::Foo>`) doesn't leak a stray `global` token
+                // into the canonicalized target (reviewer-round-2 finding #3).
+                var fqn = named.ToDisplayString(
+                    SymbolDisplayFormat.FullyQualifiedFormat
+                        .WithGlobalNamespaceStyle(SymbolDisplayGlobalNamespaceStyle.Omitted));
+                return (TypeRefVerdictKind.External, fqn, null, named.TypeKind);
             }
             var declFilePath = canonicalizeFilePath(declRef.SyntaxTree.FilePath);
-            if (string.IsNullOrEmpty(declFilePath)) return null;
+            if (string.IsNullOrEmpty(declFilePath)) return (TypeRefVerdictKind.Unresolved, null, null, default);
             var declNode = declRef.GetSyntax();
             var declName = GetDeclarationName(declNode);
-            if (declName == null) return null;
+            if (declName == null) return (TypeRefVerdictKind.Unresolved, null, null, default);
             var qualifiedRaw = GetQualifiedRawName(declNode, declName);
-            return (false, qualifiedRaw, declFilePath, named.TypeKind);
+            return (TypeRefVerdictKind.InSource, qualifiedRaw, declFilePath, named.TypeKind);
         }
         catch
         {
-            return null;
+            return (TypeRefVerdictKind.Unresolved, null, null, default);
         }
     }
 
@@ -2263,26 +2320,35 @@ static object[] ExtractRelationships(
             // uniformly; unresolvable bases drop with a Limitation instead
             // of a bare dangling edge.
             var verdict = ResolveTypeRef(baseTypeNode);
-            if (verdict == null)
+            if (verdict.Resolution == TypeRefVerdictKind.NotApplicable)
+            {
+                // Heritage can't syntactically reference a bare type
+                // parameter — defensive only, never observed in practice —
+                // but handled explicitly per the closed verdict set rather
+                // than falling through (reviewer-round-2 finding #2).
+                continue;
+            }
+            if (verdict.Resolution == TypeRefVerdictKind.Unresolved)
             {
                 RecordUnresolvedTypeRef(isClass && i == 0 ? "extends" : "implements", baseTypeNode, rawName);
                 continue;
             }
-            var v = verdict.Value;
+            var v = verdict;
             // The symbol's TypeKind — not the `I`+uppercase name heuristic
             // (Fathom row 3.1.0.15) — decides extends vs implements. The old
             // heuristic mis-classified an `I`+digit interface (`I3D`) as a
             // class base because `char.IsUpper('3')` is false.
             var isExtends = isClass && i == 0 && v.Kind != TypeKind.Interface;
+            var isExternal = v.Resolution == TypeRefVerdictKind.External;
             if (isExtends)
             {
-                if (v.IsExternal) AddExternal("extends", "class", v.Name, ProvenanceHelpers.ExternalLibrary);
-                else AddWithTargetRef("extends", "class", v.Name, v.FilePath);
+                if (isExternal) AddExternal("extends", "class", v.Name!, ProvenanceHelpers.ExternalLibrary);
+                else AddWithTargetRef("extends", "class", v.Name!, v.FilePath);
             }
             else
             {
-                if (v.IsExternal) AddExternal("implements", "explicit", v.Name, ProvenanceHelpers.ExternalLibrary);
-                else AddWithTargetRef("implements", "explicit", v.Name, v.FilePath);
+                if (isExternal) AddExternal("implements", "explicit", v.Name!, ProvenanceHelpers.ExternalLibrary);
+                else AddWithTargetRef("implements", "explicit", v.Name!, v.FilePath);
             }
         }
     }
@@ -3229,6 +3295,27 @@ static bool MatchesFilter(string path, List<string> include, List<string> exclud
     }
 
     return true;
+}
+
+// Closed-set verdict for `ResolveTypeRef` (Fathom rows 3.1.0.15/.16/.17
+// reviewer-round-2, crit 4 — finding #2). A NULLABLE tuple collapsed two
+// distinct facts into one `null`: "genuinely unresolvable" (drop + loud
+// Limitation) and "not a type-reference target at all" (a resolved
+// `ITypeParameterSymbol` — not-applicable, silent no-op by DESIGN, not by
+// omission). An explicit 4-member enum makes every call site handle both
+// outcomes on purpose instead of one masquerading as the other.
+enum TypeRefVerdictKind
+{
+    /// <summary>Real declaration in this workspace.</summary>
+    InSource,
+    /// <summary>Real symbol, no in-source declaration (BCL / referenced NuGet).</summary>
+    External,
+    /// <summary>Resolved to something that is not a type-reference edge target
+    /// at all (a generic TYPE PARAMETER) — never a resolution failure.</summary>
+    NotApplicable,
+    /// <summary>No symbol, or an `IErrorTypeSymbol` (`TypeKind.Error`) —
+    /// degraded compilation, typo, or missing reference.</summary>
+    Unresolved,
 }
 
 class AnalyzerArgs
