@@ -2,6 +2,19 @@
 
 All notable changes to `@kepello/nodegraph-analyzer-dotnet`. Reconstructed from git history; format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.65.0] — 2026-07-18
+
+**Fathom row 3.1.0.15 (follow-on) — `overrides` cross-file targetRef path canonicalization.** Every OTHER cross-file targetRef site in `src/Program.cs` routes the resolved declaration's path through `canonicalizeFilePath` (the on-disk-casing normalizer built from the directory-walked file list) before keying or comparing — the `overrides` emitter alone still built its targetRef, and its same-file comparison, straight off Roslyn's RAW `SyntaxTree.FilePath`. Where the declaring path's Roslyn casing diverges from the enumerated on-disk casing used to build the target element's own `naturalKey`, the emitted `overrides` targetRef permanently dangled — invisible on Fathom's own corpus and prior fixtures (author-controlled casing throughout) but live on any real app whose `.csproj` `<Compile Include>` casing drifts from disk (a class-first sweep of every `NaturalKeyCodec.MakeNaturalKey` call site confirmed this was the sole outlier — see Tests below).
+
+### Fixed
+
+- **`src/Program.cs` (~line 2600, `overrides` emission block).** `parentTargetFile` is now built from `canonicalizeFilePath(parentDeclRef.SyntaxTree.FilePath)` instead of the raw `SyntaxTree.FilePath`, and the same-file guard compares it against `canonicalizeFilePath(currentFilePath)` — both sides of the comparison move together, so a same-file override can't misfire as cross-file. `MakeNaturalKey(parentTargetFile, canonical)` now keys off the canonicalized path, matching the on-disk-case path the target element's own `naturalKey` uses.
+
+### Tests
+
+- **`tests/OverridesEdgeTests.cs`** — new fixture `ClassOverride_CsprojCompileIncludeCasingDivergesFromDisk_TargetRefStillMatchesTargetElementNaturalKey`: a real `.csproj` (`<Compile Include="base.cs" />`, no restore required — no PackageReferences) against an on-disk `Base.cs`, asserting the emitted `overrides` targetRef byte-matches the target element's `naturalKey`. TDD RED witnessed first against the pre-fix build (`Assert.Equal` failure, `Base.cs#` expected vs `base.cs#` actual); GREEN after the fix. The divergence is genuinely reproducible on macOS (case-preserving, not case-sensitive) because MSBuild's `<Compile Include>` path resolution is purely textual, never filesystem-queried — confirmed empirically, not assumed.
+- Full suite: **298/298 pass** (was 297, +1 from this row's fixture). `dotnet build src -c Debug` clean.
+
 ## [0.64.0] — 2026-07-17
 
 **Fathom rows 3.1.0.15/3.1.0.16/3.1.0.17 (crit 4) — reviewer-round-2 fixes on the `ResolveTypeRef` external-base fix (0.63.0).** The reviewer confirmed the core design (symbol-based in-source/external/unresolved verdict, no in-source loss, no over-tagging, `TypeKind.Interface` correct) and flagged 4 follow-on defects, all in `src/Program.cs`: a conservation break in the drop-path Limitation kind, a vocabulary collapse of type parameters into "unresolved", a malformed external-generic target, and a decision confirmation to keep (not suppress) external generic `references` edges.

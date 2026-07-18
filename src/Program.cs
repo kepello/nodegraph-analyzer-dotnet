@@ -2585,8 +2585,23 @@ static object[] ExtractRelationships(
 
                 // Resolve parent's declaring file for cross-file targetRef —
                 // the SAME declaring reference used for the param signature.
-                var parentTargetFile = parentDeclRef?.SyntaxTree.FilePath;
-                if (parentTargetFile == currentFilePath) parentTargetFile = null;
+                // Canonicalized (Fathom row 3.1.0.15 follow-on): every other
+                // cross-file targetRef site in this file routes the declaring
+                // path through `canonicalizeFilePath` before comparing/keying
+                // (see ResolveCallTarget/ResolveTypeTarget/ResolveTypeRef/
+                // ResolveIdentifierTarget/ResolveAccessorTarget above, and the
+                // `currentFileCanon` idiom at line ~821). This was the one
+                // outlier still comparing/keying on Roslyn's RAW
+                // SyntaxTree.FilePath — where its casing diverges from the
+                // enumerated on-disk casing used to build the target
+                // element's `naturalKey` (line ~972), the emitted `overrides`
+                // targetRef would permanently dangle. Both sides of the
+                // same-file comparison must move together, or a
+                // same-file override could misfire as cross-file.
+                var parentTargetFile = parentDeclRef != null
+                    ? canonicalizeFilePath(parentDeclRef.SyntaxTree.FilePath)
+                    : null;
+                if (parentTargetFile == canonicalizeFilePath(currentFilePath)) parentTargetFile = null;
                 if (parentTargetFile != null && parentTargetFile.Contains("/node_modules/", StringComparison.Ordinal))
                 {
                     // Don't emit overrides for external (npm-style; rare in .NET

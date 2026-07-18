@@ -246,4 +246,86 @@ namespace MyApp {
         }
         finally { Directory.Delete(dir, true); }
     }
+
+    [Fact]
+    public void ClassOverride_CsprojCompileIncludeCasingDivergesFromDisk_TargetRefStillMatchesTargetElementNaturalKey()
+    {
+        // Fathom row 3.1.0.15 (follow-on): every OTHER cross-file targetRef
+        // site in Program.cs routes the Roslyn declaring path through
+        // `canonicalizeFilePath` (the on-disk-casing normalizer) before
+        // keying/comparing; the `overrides` emitter was the one outlier,
+        // building its targetRef straight off the RAW
+        // `SyntaxTree.FilePath`.
+        //
+        // The divergence this pins is REAL, not hypothetical, even on a
+        // case-preserving macOS filesystem: MSBuild's `<Compile Include>`
+        // path resolution is purely textual (Path.Combine over the
+        // declared string), never filesystem-queried, so a project that
+        // declares `<Compile Include="base.cs" />` against an on-disk
+        // `Base.cs` loads and compiles FINE (case-insensitive FS) while
+        // `document.FilePath` — and therefore every declaring
+        // `SyntaxTree.FilePath` resolved off that project's Compilation —
+        // carries the LOWERCASE declared spelling. The element natural key
+        // for `Base.cs` (built from the directory-walked, on-disk-case
+        // path) still reads `Base.cs`. Pre-fix, the raw-keyed `overrides`
+        // targetRef read `...:base.cs#...` — a permanent dangle against the
+        // `...:Base.cs#...` naturalKey. (Witnessed RED against the
+        // pre-fix build: the `extends` edge on this same fixture — which
+        // already routed through `ResolveTypeRef`/`canonicalizeFilePath` —
+        // resolved correctly, isolating `overrides` as the sole outlier.)
+        //
+        // Requires MSBuildWorkspace to actually load the project (not just
+        // the references-free sharedCompilation fallback), so `Derived.cs`
+        // — the overriding file — is spelled identically in both
+        // `<Compile Include>` and on disk (it must Ordinal-match the
+        // directory walk to land in the project map); only `Base.cs`, the
+        // OVERRIDDEN parent's file, carries the diverging csproj casing.
+        // No PackageReferences, so no `dotnet restore` is required for
+        // MSBuildWorkspace to open it.
+        var dir = MakeTempTree(
+            ("App.csproj", @"
+<Project Sdk=""Microsoft.NET.Sdk"">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove=""**/*.cs"" />
+    <Compile Include=""base.cs"" />
+    <Compile Include=""Derived.cs"" />
+  </ItemGroup>
+</Project>"),
+            ("Base.cs", @"
+using System;
+public abstract class AuthenticatedModalBase {
+    public virtual void OnInit(EventArgs e) { }
+}"),
+            ("Derived.cs", @"
+using System;
+public class LoginModal : AuthenticatedModalBase {
+    public override void OnInit(EventArgs e) { }
+}"));
+        try
+        {
+            var (naturalKeys, overrides) = AnalyzeOverrides(dir);
+
+            var edge = Assert.Single(overrides, o => o.ElementName == "loginmodal/oninit-eventargs");
+            Assert.NotNull(edge.TargetRef);
+
+            // The target element's own naturalKey is keyed by the
+            // DIRECTORY-WALKED (on-disk-case) path — "Base.cs", not the
+            // csproj's declared "base.cs".
+            var baseArtifactId = Path.Combine(dir, "Base.cs");
+            var expectedTargetKey = naturalKeys[$"{baseArtifactId}#authenticatedmodalbase/oninit-eventargs"];
+            Assert.False(string.IsNullOrEmpty(expectedTargetKey), "target element must exist and carry a naturalKey");
+
+            // Byte-identical, not just case-insensitively equal — a
+            // case-insensitive Assert here would pass for the pre-fix
+            // bug too (storage keys are case-sensitive strings).
+            Assert.Equal(expectedTargetKey, edge.TargetRef);
+            Assert.Contains("Base.cs#", edge.TargetRef);
+            Assert.DoesNotContain("base.cs#", edge.TargetRef);
+        }
+        finally { Directory.Delete(dir, true); }
+    }
 }
